@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 
+from src.metrics import *
+
 class SheafConvLayer(nn.Module):
     """
     A single Sheaf Convolution Layer for message passing using learned restriction maps.
@@ -76,10 +78,11 @@ class SheafConvLayer(nn.Module):
         Returns:
             Tensor: Map values [num_edges, 1]
         """
+        
         row, col = self.edge_index
         x_row = x[row]  # Source node features
         x_col = x[col]  # Target node features
-        edge_inputs = torch.cat([x_row, x_col, edge_attr.to(self.device)], dim=1)
+        edge_inputs = torch.cat([x_row.to(self.device), x_col.to(self.device), edge_attr.to(self.device)], dim=1)
         maps = self.sheaf_learner(edge_inputs)  # Output a scalar map per edge
         return maps
 
@@ -250,9 +253,109 @@ class SheafMultimodalGNN(pl.LightningModule):
         loss_text = nn.CrossEntropyLoss()(sim_matrix[:target_size, :target_size], target)
         loss_image = nn.CrossEntropyLoss()(sim_matrix[:target_size, :target_size].T, target)
         loss = (loss_text + loss_image) / 2
-
+        
+        metrics = compute_bidirectional_metrics(
+            text_emb[:target_size], 
+            image_emb[:target_size], 
+            k_values=[1, 5, 10]
+        )
+        
         self.log('train_loss', loss)
+        for name, value in metrics.items():
+            self.log(f'train_{name}', value, prog_bar=True)
+
         return loss
+    
+    def validation_step(self, batch, batch_idx):
+        """
+        Validation step to evaluate model performance on validation data.
+
+        Args:
+            batch (tuple): (node_features, edge_index, edge_attr, num_texts)
+            batch_idx (int): Index of the batch
+
+        Returns:
+            dict: Dictionary containing validation metrics
+        """
+        x, edge_index, edge_attr, num_texts = batch
+
+        # Forward pass
+        embeddings = self.forward(x)
+
+        # Separate text and image embeddings
+        text_emb = embeddings[:num_texts]
+        image_emb = embeddings[num_texts:]
+
+        # Normalize embeddings
+        text_emb = nn.functional.normalize(text_emb, dim=1)
+        image_emb = nn.functional.normalize(image_emb, dim=1)
+
+        # Compute similarity matrix
+        sim_matrix = torch.matmul(text_emb, image_emb.T)
+
+        # Calculate loss
+        target_size = min(text_emb.size(0), image_emb.size(0))
+        target = torch.arange(target_size, device=self.device)
+        
+        loss_text = nn.CrossEntropyLoss()(sim_matrix[:target_size, :target_size], target)
+        loss_image = nn.CrossEntropyLoss()(sim_matrix[:target_size, :target_size].T, target)
+        val_loss = (loss_text + loss_image) / 2
+
+        # Compute metrics
+        metrics = compute_bidirectional_metrics(
+            text_emb[:target_size], 
+            image_emb[:target_size], 
+            k_values=[1, 5, 10]
+        )
+        
+        # Log metrics
+        self.log('val_loss', val_loss, prog_bar=True, sync_dist=True)
+        for name, value in metrics.items():
+            self.log(f'val_{name}', value, prog_bar=True, sync_dist=True)
+
+        return {'val_loss': val_loss, **{f'val_{k}': v for k, v in metrics.items()}}
+
+    def test_step(self, batch, batch_idx):
+        """
+        Test step to evaluate model performance on test data.
+
+        Args:
+            batch (tuple): (node_features, edge_index, edge_attr, num_texts)
+            batch_idx (int): Index of the batch
+
+        Returns:
+            dict: Dictionary containing test metrics
+        """
+        x, edge_index, edge_attr, num_texts = batch
+
+        # Forward pass
+        embeddings = self.forward(x)
+
+        # Separate embeddings
+        text_emb = embeddings[:num_texts]
+        image_emb = embeddings[num_texts:]
+
+        # Normalize embeddings
+        text_emb = nn.functional.normalize(text_emb, dim=1)
+        image_emb = nn.functional.normalize(image_emb, dim=1)
+
+        # Compute similarity matrix
+        sim_matrix = torch.matmul(text_emb, image_emb.T)
+
+        # Calculate metrics
+        target_size = min(text_emb.size(0), image_emb.size(0))
+        
+        metrics = compute_bidirectional_metrics(
+            text_emb[:target_size], 
+            image_emb[:target_size], 
+            k_values=[1, 5, 10]
+        )
+        
+        # Log metrics
+        for name, value in metrics.items():
+            self.log(f'test_{name}', value, prog_bar=True, sync_dist=True)
+
+        return {f'test_{k}': v for k, v in metrics.items()}
 
     def configure_optimizers(self):
         """
