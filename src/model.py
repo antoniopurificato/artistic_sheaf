@@ -35,13 +35,21 @@ class SheafConvLayer(nn.Module):
             nn.ReLU(),
             nn.Linear(64, 1),
             nn.Tanh()  # keeps map values in range [-1, 1]
-        )
+        ).to(device)
 
         self.linear = nn.Linear(latent_dim, latent_dim)
 
         # Precompute left and right map index lookup
         self.left_idx, self.right_idx = self.compute_left_right_map_index()
 
+    def reinitialize_for_new_graph(self, new_edge_index, new_edge_attr, new_num_nodes):
+        self.edge_index = new_edge_index.to(self.device)
+        self.num_nodes = new_num_nodes
+        self.edge_attr_dim = new_edge_attr.size(1)
+        self.edge_attr = new_edge_attr.to(self.device)
+        self.left_idx, self.right_idx = self.compute_left_right_map_index()
+    
+        
     def compute_left_right_map_index(self):
         """
         Constructs index maps for symmetric edges (s,t) and (t,s).
@@ -79,9 +87,10 @@ class SheafConvLayer(nn.Module):
             Tensor: Map values [num_edges, 1]
         """
         
-        row, col = self.edge_index
+        row, col = self.edge_index        
         x_row = x[row]  # Source node features
         x_col = x[col]  # Target node features
+        # print("shape of x_row in sheaf", x_row.shape, "shape of x_col in sheaf", x_col.shape, "shape of edge_attr in sheaf", edge_attr.shape)
         edge_inputs = torch.cat([x_row.to(self.device), x_col.to(self.device), edge_attr.to(self.device)], dim=1)
         maps = self.sheaf_learner(edge_inputs)  # Output a scalar map per edge
         return maps
@@ -138,7 +147,9 @@ class SheafConvLayer(nn.Module):
             Tensor: Updated node features [num_nodes, latent_dim]
         """
         if x.dim() == 3 and x.size(0) == 1:
-            x = x.squeeze(0)
+            x = x.squeeze(0) 
+        # print("shape of x in sheaf"  , x.shape)
+        
         maps = self.predict_restriction_maps(x, edge_attr)
         laplacian = self.build_laplacian(maps)
         y = self.linear(x)
@@ -176,7 +187,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         self._device = device
 
         # Project input features into latent space
-        self.input_proj = nn.Linear(self.input_dim, latent_dim)
+        self.input_proj = nn.Linear(self.input_dim, latent_dim) #change this for CLIP with layer fixed
 
         # Final output projection
         self.output_proj = nn.Linear(latent_dim, latent_dim)
@@ -197,7 +208,23 @@ class SheafMultimodalGNN(pl.LightningModule):
             for _ in range(self.num_layers)
         ])
     
-
+    def reinitialize_for_new_graph(self, new_edge_index, new_edge_attr, new_num_nodes):
+        # print(int(new_edge_index.max().numpy()) + 1)
+        self.convs = nn.ModuleList([
+            SheafConvLayer(
+                self.latent_dim,
+                self.latent_dim,
+                new_edge_index.squeeze(0) ,
+                new_edge_attr.squeeze(0).size(1),
+                num_nodes=int(new_edge_index.max().numpy()) + 1,  # Ensure num_nodes is correct
+                step_size=self.step_size,
+                device=self._device
+            )
+            for _ in range(self.num_layers)
+        ])
+        self.edge_attr = new_edge_attr.squeeze(0).to(self.device)
+    
+    
     def forward(self, x):
         """
         Forward pass through the full GNN.
@@ -208,14 +235,21 @@ class SheafMultimodalGNN(pl.LightningModule):
         Returns:
             Tensor: Final node embeddings [num_nodes, latent_dim]
         """
-        if x.dim() == 3 and x.size(0) == 1:
-            x = x.squeeze(0)
+        #if x.dim() == 3 and x.size(0) == 1:
+        #    x = x.squeeze(0)
+        # print("shape of x original"  , x.shape)
+           
         h = self.input_proj(x)
 
+        # print("shape of x projected"  , h.shape)
+        
         for conv in self.convs:
             h = conv(h, self.edge_attr)
+            # print("shape of x in after iteration"  , h.shape)
 
         out = self.output_proj(h)
+        # print("shape of x output"  , out.shape)
+        
         return out
 
     def training_step(self, batch, batch_idx):
@@ -230,10 +264,16 @@ class SheafMultimodalGNN(pl.LightningModule):
             Tensor: Total loss
         """
         x, edge_index, edge_attr, num_texts = batch
+        # print("shape of x in training step", x.shape, "num_texts:", num_texts, "edge_index:", edge_index.shape, "edge_attr:", edge_attr.shape)
 
+        if batch_idx == 0:
+            self.reinitialize_for_new_graph(edge_index, edge_attr, num_texts)
+        
+        # print("edge index shape:", edge_index.shape)
         # Forward pass to get all embeddings
         embeddings = self.forward(x)
-
+        # print("shape of embeddings in training step", embeddings.shape)
+    
         # Separate text and image embeddings
         text_emb = embeddings[:num_texts]      # [N_text, latent_dim]
         image_emb = embeddings[num_texts:]     # [N_image, latent_dim]
@@ -278,10 +318,15 @@ class SheafMultimodalGNN(pl.LightningModule):
             dict: Dictionary containing validation metrics
         """
         x, edge_index, edge_attr, num_texts = batch
-
+        
+        # print("shape of x in val step", x.shape, "num_texts:", num_texts, "edge_index:", edge_index.shape, "edge_attr:", edge_attr.shape)
+        if batch_idx == 0:
+            self.reinitialize_for_new_graph(edge_index, edge_attr, num_texts)
+        
         # Forward pass
         embeddings = self.forward(x)
-
+        # print("shape of embeddings in val step", embeddings.shape)
+        # print("num texts", num_texts, "edge_index:", edge_index.shape, "edge_attr:", edge_attr.shape)
         # Separate text and image embeddings
         text_emb = embeddings[:num_texts]
         image_emb = embeddings[num_texts:]
@@ -328,6 +373,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         """
         x, edge_index, edge_attr, num_texts = batch
 
+        self.reinitialize_for_new_graph(edge_index, edge_attr, num_texts)
         # Forward pass
         embeddings = self.forward(x)
 

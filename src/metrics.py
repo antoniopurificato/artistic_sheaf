@@ -164,9 +164,11 @@ def compute_bidirectional_metrics(
         Dict[str, torch.Tensor]: Dictionary containing all computed metrics for both directions
     """
     # Compute similarity matrices for both directions
+    # print("shape of text_emb:", text_emb.shape, "shape of image_emb:", image_emb.shape)
     sim_matrix_t2i = torch.matmul(text_emb, image_emb.T)
     sim_matrix_i2t = sim_matrix_t2i.T
     
+    # print(sim_matrix_t2i, 'shape of sim_matrix_t2i:', sim_matrix_t2i.shape, 'shape of sim_matrix_i2t:', sim_matrix_i2t.shape)
     # Compute metrics for text→image direction
     t2i_metrics = compute_retrieval_metrics(sim_matrix_t2i, k_values)
     

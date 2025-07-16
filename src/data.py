@@ -8,6 +8,27 @@ from sentence_transformers import SentenceTransformer
 import matplotlib.pyplot as plt
 import networkx as nx
 import os
+import open_clip
+from PIL import Image
+from tqdm import tqdm
+
+def get_clip_embedder(itm, model, preprocess, base_folder='../wikidata_arthist/'):
+    device = 'cuda' if torch.cuda.is_available() else 'mps'
+    tokenizer = open_clip.get_tokenizer('ViT-B-32')
+    
+    with torch.no_grad():
+        if os.path.isfile(os.path.join(base_folder, itm)):
+            image = preprocess(Image.open(os.path.join(base_folder, itm))).unsqueeze(0).to(device)
+            image_features = model.encode_image(image)
+            image_features /= image_features.norm(dim=-1, keepdim=True)
+            features = image_features
+        else:
+            text = tokenizer([itm]).to(device)
+            text_features = model.encode_text(text)
+            text_features /= text_features.norm(dim=-1, keepdim=True)
+            features = text_features
+    return features
+
 
 def load_json_data(json_path: str) -> List[Dict]:
     """
@@ -25,7 +46,9 @@ def load_json_data(json_path: str) -> List[Dict]:
 
 def build_graph_from_json(
     data_list: List[Dict],
-    embedder: SentenceTransformer
+    model,
+    preprocess
+    
 ) -> Tuple[Data, Dict[str, int], List[str]]:
     """
     Builds a PyTorch Geometric graph from the JSON input.
@@ -48,25 +71,26 @@ def build_graph_from_json(
 
     node_id_counter = 0
 
-    for item in data_list:
+    for item in tqdm(data_list):
         # Process nodes: 'sentence' and 'image_path'
-        for key in ['sentence', 'image_path']:
+        for key in ['item1', 'item2']:
             val = str(item.get(key, ""))  # Convert non-string to string if needed
 
             if val not in node_to_id:
                 node_to_id[val] = node_id_counter
                 try:
-                    embedding = embedder.encode(val)
+                    embedding = get_clip_embedder(val, model, preprocess)
+                    embedding = embedding.reshape((512)).cpu()
                     node_features.append(embedding)
                     node_id_counter += 1
                 except Exception as e:
                     print(f"[Warning] Failed to embed node '{val}': {e}")
-                    node_features.append(np.zeros(embedder.get_sentence_embedding_dimension()))
+                    node_features.append(np.zeros((512)))
                     node_id_counter += 1
 
         # Create edge
-        src = node_to_id[str(item.get('sentence', ''))]
-        dst = node_to_id[str(item.get('image_path', ''))]
+        src = node_to_id[str(item.get('item1', ''))]
+        dst = node_to_id[str(item.get('item2', ''))]
         edge_index_list.append([src, dst])
 
         # Process edge feature: 'link'
@@ -74,11 +98,13 @@ def build_graph_from_json(
         raw_edge_labels.append(link_text)
 
         try:
-            link_embedding = embedder.encode(link_text)
+            link_embedding = get_clip_embedder(link_text, model, preprocess)
+            link_embedding = link_embedding.reshape((512)).cpu()
             edge_features.append(link_embedding)
+            
         except Exception as e:
             print(f"[Warning] Failed to embed link '{link_text}': {e}")
-            edge_features.append(np.zeros(embedder.get_sentence_embedding_dimension()))
+            edge_features.append(np.zeros((512)))
 
     # Convert to PyTorch tensors
     x = torch.tensor(np.array(node_features), dtype=torch.float)
@@ -92,7 +118,7 @@ def plot_subgraph(
     data: Data,
     node_to_id: Dict[str, int],
     raw_edge_labels: Optional[List[str]] = None,
-    num_nodes: int = 10,
+    num_nodes: int = 30,
     save_path: str = "graph.png"
 ) -> None:
     """
@@ -117,7 +143,7 @@ def plot_subgraph(
     pos = nx.spring_layout(subgraph, seed=42)
 
     # Draw nodes and edges
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(20, 12))
     nx.draw(
         subgraph,
         pos,
@@ -149,19 +175,23 @@ def plot_subgraph(
 
 
 def main(file_name:str, data_folder:str="data",
-         plot_subgraph:bool=True) -> None:
+         plot_subgr:bool=True) -> None:
     """
     Main entry point for building and visualizing the graph.
     """
     json_path = os.path.join(data_folder,file_name)
-    embedder = SentenceTransformer('all-MiniLM-L6-v2')
+    model, _, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
+    model = model.to('cuda' if torch.cuda.is_available() else 'mps')
+    model.eval()  # model in train mode by default, impacts some models with BatchNorm or stochastic depth active
+    
+    # embedder = SentenceTransformer('all-MiniLM-L6-v2') #change to CLIP
 
-    data_list = load_json_data(json_path)
-    graph_data, node_to_id, raw_edge_labels = build_graph_from_json(data_list, embedder)
+    data_list = load_json_data(json_path)[:200] #make it batch loading
+    graph_data, node_to_id, raw_edge_labels = build_graph_from_json(data_list, model, preprocess)
 
-    if plot_subgraph:
+    if plot_subgr:
         plot_subgraph(graph_data, node_to_id, raw_edge_labels=raw_edge_labels, num_nodes=12)
 
 
 if __name__ == "__main__":
-    main(file_name="test_text_image_split.json")
+    main(file_name="test_artist_split.json")
