@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
+import torch.nn.functional as F
 
 from src.metrics import *
 
@@ -42,13 +43,6 @@ class SheafConvLayer(nn.Module):
         # Precompute left and right map index lookup
         self.left_idx, self.right_idx = self.compute_left_right_map_index()
 
-    def reinitialize_for_new_graph(self, new_edge_index, new_edge_attr, new_num_nodes):
-        self.edge_index = new_edge_index.to(self.device)
-        self.num_nodes = new_num_nodes
-        self.edge_attr_dim = new_edge_attr.size(1)
-        self.edge_attr = new_edge_attr.to(self.device)
-        self.left_idx, self.right_idx = self.compute_left_right_map_index()
-    
         
     def compute_left_right_map_index(self):
         """
@@ -235,22 +229,65 @@ class SheafMultimodalGNN(pl.LightningModule):
         Returns:
             Tensor: Final node embeddings [num_nodes, latent_dim]
         """
-        #if x.dim() == 3 and x.size(0) == 1:
-        #    x = x.squeeze(0)
-        # print("shape of x original"  , x.shape)
-           
+        if x.dim() == 3 and x.size(0) == 1:
+           x = x.squeeze(0)
         h = self.input_proj(x)
 
-        # print("shape of x projected"  , h.shape)
-        
         for conv in self.convs:
             h = conv(h, self.edge_attr)
-            # print("shape of x in after iteration"  , h.shape)
 
         out = self.output_proj(h)
-        # print("shape of x output"  , out.shape)
-        
         return out
+    
+    def compute_loss_contrastive(self, cos_sim_matrix, adjacency_matrix):
+        margin = 0.5  # adjust as needed
+
+        pos_mask = adjacency_matrix == 1
+        neg_mask = adjacency_matrix == 0
+
+        pos_loss = (1 - cos_sim_matrix[pos_mask]).pow(2).mean()
+        neg_loss = (F.relu(cos_sim_matrix[neg_mask] - margin)).pow(2).mean()
+
+        loss = pos_loss + neg_loss
+        return loss
+
+    def step(self, batch, batch_idx, split='train'):
+        x, edge_index, edge_attr, num_texts = batch
+        
+        if batch_idx == 0:
+            self.reinitialize_for_new_graph(edge_index, edge_attr, num_texts)
+        
+        # print("edge index shape:", edge_index.shape)
+        # Forward pass to get all embeddings
+        embeddings = self.forward(x)
+        
+        num_nodes = int(edge_index.max().item()) + 1
+        # Create empty adjacency matrix
+        adj = torch.zeros((num_nodes, num_nodes), dtype=torch.float)
+        adj[edge_index.squeeze(0)[0], edge_index.squeeze(0)[1]] = 1.0
+        
+        src_nodes = torch.arange(num_nodes)
+        tgt_nodes = torch.arange(num_nodes)
+        src_emb = F.normalize(embeddings[src_nodes], p=2, dim=1)
+        tgt_emb = F.normalize(embeddings[tgt_nodes], p=2, dim=1)
+        cos_sim_matrix = torch.matmul(src_emb, tgt_emb.T)  # shape: [num_nodes, num_nodes]
+
+        loss = self.compute_loss_contrastive(cos_sim_matrix, adj)
+        # turn into getting the nodes that have a link (edge index)
+        
+        metrics = compute_bidirectional_metrics(
+            cos_sim_matrix, adj,
+            k_values=[1, 5, 10]
+        )
+        
+        self.log(f'{split}_loss', loss)
+        for name, value in metrics.items():
+            self.log(f'{split}_{name}', value, prog_bar=True)
+            
+        if split == 'train':
+            return loss
+        else:
+            return loss, metrics
 
     def training_step(self, batch, batch_idx):
         """
@@ -263,48 +300,8 @@ class SheafMultimodalGNN(pl.LightningModule):
         Returns:
             Tensor: Total loss
         """
-        x, edge_index, edge_attr, num_texts = batch
-        # print("shape of x in training step", x.shape, "num_texts:", num_texts, "edge_index:", edge_index.shape, "edge_attr:", edge_attr.shape)
-
-        if batch_idx == 0:
-            self.reinitialize_for_new_graph(edge_index, edge_attr, num_texts)
         
-        # print("edge index shape:", edge_index.shape)
-        # Forward pass to get all embeddings
-        embeddings = self.forward(x)
-        # print("shape of embeddings in training step", embeddings.shape)
-    
-        # Separate text and image embeddings
-        text_emb = embeddings[:num_texts]      # [N_text, latent_dim]
-        image_emb = embeddings[num_texts:]     # [N_image, latent_dim]
-
-        # Normalize for cosine similarity
-        text_emb = nn.functional.normalize(text_emb, dim=1)
-        image_emb = nn.functional.normalize(image_emb, dim=1)
-
-        # Similarity matrix between text and image embeddings
-        sim_matrix = torch.matmul(text_emb, image_emb.T)  # [N_text, N_image]
-
-        # Use the minimum of both sizes to avoid indexing errors
-        target_size = min(text_emb.size(0), image_emb.size(0))
-        target = torch.arange(target_size, device=self.device)
-
-        # Contrastive cross-entropy losses
-        loss_text = nn.CrossEntropyLoss()(sim_matrix[:target_size, :target_size], target)
-        loss_image = nn.CrossEntropyLoss()(sim_matrix[:target_size, :target_size].T, target)
-        loss = (loss_text + loss_image) / 2
-        
-        metrics = compute_bidirectional_metrics(
-            text_emb[:target_size], 
-            image_emb[:target_size], 
-            k_values=[1, 5, 10]
-        )
-        
-        self.log('train_loss', loss)
-        for name, value in metrics.items():
-            self.log(f'train_{name}', value, prog_bar=True)
-
-        return loss
+        return self.step(batch, batch_idx, split='train')
     
     def validation_step(self, batch, batch_idx):
         """
@@ -317,47 +314,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         Returns:
             dict: Dictionary containing validation metrics
         """
-        x, edge_index, edge_attr, num_texts = batch
-        
-        # print("shape of x in val step", x.shape, "num_texts:", num_texts, "edge_index:", edge_index.shape, "edge_attr:", edge_attr.shape)
-        if batch_idx == 0:
-            self.reinitialize_for_new_graph(edge_index, edge_attr, num_texts)
-        
-        # Forward pass
-        embeddings = self.forward(x)
-        # print("shape of embeddings in val step", embeddings.shape)
-        # print("num texts", num_texts, "edge_index:", edge_index.shape, "edge_attr:", edge_attr.shape)
-        # Separate text and image embeddings
-        text_emb = embeddings[:num_texts]
-        image_emb = embeddings[num_texts:]
-
-        # Normalize embeddings
-        text_emb = nn.functional.normalize(text_emb, dim=1)
-        image_emb = nn.functional.normalize(image_emb, dim=1)
-
-        # Compute similarity matrix
-        sim_matrix = torch.matmul(text_emb, image_emb.T)
-
-        # Calculate loss
-        target_size = min(text_emb.size(0), image_emb.size(0))
-        target = torch.arange(target_size, device=self.device)
-        
-        loss_text = nn.CrossEntropyLoss()(sim_matrix[:target_size, :target_size], target)
-        loss_image = nn.CrossEntropyLoss()(sim_matrix[:target_size, :target_size].T, target)
-        val_loss = (loss_text + loss_image) / 2
-
-        # Compute metrics
-        metrics = compute_bidirectional_metrics(
-            text_emb[:target_size], 
-            image_emb[:target_size], 
-            k_values=[1, 5, 10]
-        )
-        
-        # Log metrics
-        self.log('val_loss', val_loss, prog_bar=True, sync_dist=True)
-        for name, value in metrics.items():
-            self.log(f'val_{name}', value, prog_bar=True, sync_dist=True)
-
+        val_loss, metrics = self.step(batch, batch_idx, split='val')
         return {'val_loss': val_loss, **{f'val_{k}': v for k, v in metrics.items()}}
 
     def test_step(self, batch, batch_idx):
@@ -371,36 +328,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         Returns:
             dict: Dictionary containing test metrics
         """
-        x, edge_index, edge_attr, num_texts = batch
-
-        self.reinitialize_for_new_graph(edge_index, edge_attr, num_texts)
-        # Forward pass
-        embeddings = self.forward(x)
-
-        # Separate embeddings
-        text_emb = embeddings[:num_texts]
-        image_emb = embeddings[num_texts:]
-
-        # Normalize embeddings
-        text_emb = nn.functional.normalize(text_emb, dim=1)
-        image_emb = nn.functional.normalize(image_emb, dim=1)
-
-        # Compute similarity matrix
-        sim_matrix = torch.matmul(text_emb, image_emb.T)
-
-        # Calculate metrics
-        target_size = min(text_emb.size(0), image_emb.size(0))
-        
-        metrics = compute_bidirectional_metrics(
-            text_emb[:target_size], 
-            image_emb[:target_size], 
-            k_values=[1, 5, 10]
-        )
-        
-        # Log metrics
-        for name, value in metrics.items():
-            self.log(f'test_{name}', value, prog_bar=True, sync_dist=True)
-
+        test_loss, metrics = self.step(batch, batch_idx, split='test')
         return {f'test_{k}': v for k, v in metrics.items()}
 
     def configure_optimizers(self):

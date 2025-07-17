@@ -54,7 +54,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42):
     # embedder = SentenceTransformer('all-MiniLM-L6-v2').to(device)
 
     # Training data
-    train_data_list = load_json_data(train_path)[:100]
+    train_data_list = load_json_data(train_path)[:10000]
     train_graph_data, train_node_to_id, train_edge_labels = build_graph_from_json(train_data_list, model, preprocess)
     # Move graph data to GPU
     train_graph_data = train_graph_data.to(device)
@@ -63,7 +63,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42):
     print("Loaded training data with {} text nodes.".format(train_num_texts))
     
     # Validation data
-    val_data_list = load_json_data(val_path)[:20]
+    val_data_list = load_json_data(val_path)[:2000]
     val_graph_data, val_node_to_id, val_edge_labels = build_graph_from_json(val_data_list, model, preprocess)
     # Move graph data to GPU
     val_graph_data = val_graph_data.to(device)
@@ -72,7 +72,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42):
     print("Loaded validation data with {} text nodes.".format(val_num_texts))
     
     # Test data
-    test_data_list = load_json_data(test_path)[:20]
+    test_data_list = load_json_data(test_path)[:2000]
     test_graph_data, test_node_to_id, test_edge_labels = build_graph_from_json(test_data_list, model, preprocess)
     # Move graph data to GPU
     test_graph_data = test_graph_data.to(device)
@@ -93,9 +93,9 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42):
         latent_dim=latent_dim,
         edge_index=train_graph_data.edge_index,
         edge_attr=train_graph_data.edge_attr,
-        num_layers=3,
+        num_layers=10,
         step_size=1.0,
-        lr=1e-3,
+        lr=1e-4,
         device=device
     ).to(device)
     
@@ -118,7 +118,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42):
     
     # Configure the trainer with GPU acceleration
     trainer = pl.Trainer(
-        max_epochs=100,
+        max_epochs=1000,
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
         devices=1, # Use 1 GPU if  
         callbacks=[

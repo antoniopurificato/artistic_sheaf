@@ -1,96 +1,89 @@
 import torch
 from typing import Dict, List
 
-def compute_precision_at_k(sim_matrix: torch.Tensor, k: int) -> torch.Tensor:
+def compute_precision_at_k(sim_matrix: torch.Tensor, 
+                           adj_matrix: torch.Tensor, 
+                           k: int) -> torch.Tensor:
     """
-    Compute Precision@K for a similarity matrix.
-    
-    Precision@K measures the proportion of relevant items among the top K retrieved items.
-    
-    Args:
-        sim_matrix (torch.Tensor): Similarity matrix of shape [num_queries, num_items]
-        k (int): Number of items to consider
-    
-    Returns:
-        torch.Tensor: Precision@K score (scalar)
-    """
-    num_queries = sim_matrix.size(0)
-    k = min(k, sim_matrix.size(1))  # Ensure k doesn't exceed matrix dimension
-    
-    # Get top k indices
-    _, top_k_indices = torch.topk(sim_matrix, k=k, dim=1)
-    
-    # Create target indices (assuming diagonal is ground truth)
-    target = torch.arange(num_queries, device=sim_matrix.device).view(-1, 1)
-    
-    # Check if target is in top k results
-    correct = (top_k_indices == target).any(dim=1)
-    
-    # Calculate precision
-    precision = correct.float().sum() / (num_queries * k)
-    
-    return precision
+    Compute Precision@K given a similarity matrix and a ground truth adjacency matrix.
 
-def compute_recall_at_k(sim_matrix: torch.Tensor, k: int) -> torch.Tensor:
-    """
-    Compute Recall@K for a similarity matrix.
-    
-    Recall@K measures the proportion of relevant items found among the top K retrieved items.
-    In this context, each query has exactly one relevant item.
-    
     Args:
         sim_matrix (torch.Tensor): Similarity matrix of shape [num_queries, num_items]
-        k (int): Number of items to consider
-    
+        adj_matrix (torch.Tensor): Binary relevance matrix [num_queries, num_items]
+                                   where 1 means relevant, 0 means not relevant
+        k (int): Number of top items to consider
+
     Returns:
-        torch.Tensor: Recall@K score (scalar)
+        torch.Tensor: Mean Precision@K score over all queries
     """
     num_queries = sim_matrix.size(0)
     k = min(k, sim_matrix.size(1))
-    
-    # Get top k indices
-    _, top_k_indices = torch.topk(sim_matrix, k=k, dim=1)
-    
-    # Create target indices
-    target = torch.arange(num_queries, device=sim_matrix.device).view(-1, 1)
-    
-    # Check if target is in top k results
-    correct = (top_k_indices == target).any(dim=1)
-    
-    # Calculate recall (same as hit rate in this case as we have only one relevant item per query)
-    recall = correct.float().mean()
-    
-    return recall
 
-def compute_ndcg_at_k(sim_matrix: torch.Tensor, k: int) -> torch.Tensor:
+    # Get top-k indices per query
+    _, top_k_indices = torch.topk(sim_matrix, k=k, dim=1)
+
+    # Gather ground-truth relevance for top-k items
+    # Shape: [num_queries, k]
+    relevant_at_k = torch.gather(adj_matrix, dim=1, index=top_k_indices)
+
+    # Precision@k = (# relevant in top-k) / k
+    precision_per_query = relevant_at_k.sum(dim=1) / k
+
+    # Return mean precision across queries
+    return precision_per_query.mean()
+
+
+def compute_recall_at_k(sim_matrix: torch.Tensor, 
+                        adj_matrix: torch.Tensor, 
+                        k: int) -> torch.Tensor:
     """
-    Compute Normalized Discounted Cumulative Gain (NDCG) at K.
-    
-    NDCG measures the quality of ranking by taking into account both the relevance and 
-    position of results. It penalizes relevant items appearing lower in the ranking.
-    
+    Compute Recall@K given a similarity matrix and a binary ground-truth relevance matrix.
+
     Args:
         sim_matrix (torch.Tensor): Similarity matrix of shape [num_queries, num_items]
-        k (int): Number of items to consider
-    
+        adj_matrix (torch.Tensor): Binary relevance matrix [num_queries, num_items]
+        k (int): Number of top items to consider
+
     Returns:
-        torch.Tensor: NDCG@K score (scalar)
+        torch.Tensor: Mean Recall@K score over all queries
     """
-    def _dcg_at_k(relevances: torch.Tensor, k: int) -> torch.Tensor:
-        """
-        Compute Discounted Cumulative Gain (DCG) at K.
-        
-        Args:
-            relevances (torch.Tensor): Binary relevance scores
-            k (int): Number of items to consider
-        
-        Returns:
-            torch.Tensor: DCG score
-        """
-        k = min(k, len(relevances))
-        relevances = relevances[:k]
-        gains = 2**relevances - 1
-        discounts = torch.log2(torch.arange(len(relevances), device=relevances.device) + 2.0)
+    num_queries = sim_matrix.size(0)
+    k = min(k, sim_matrix.size(1))
+
+    # Get top-k indices per query
+    _, top_k_indices = torch.topk(sim_matrix, k=k, dim=1)
+
+    # Get relevance at top-k indices: shape [num_queries, k]
+    relevant_at_k = torch.gather(adj_matrix, dim=1, index=top_k_indices)
+
+    # Total number of relevant items per query
+    total_relevant = adj_matrix.sum(dim=1).clamp(min=1)  # avoid division by zero
+
+    # Recall per query = (# relevant items in top-k) / (total relevant)
+    recall_per_query = relevant_at_k.sum(dim=1) / total_relevant
+
+    # Mean recall across queries
+    return recall_per_query.mean()
+
+
+def compute_ndcg_at_k(sim_matrix: torch.Tensor, 
+                      adj_matrix: torch.Tensor, 
+                      k: int) -> torch.Tensor:
+    """
+    Compute Normalized Discounted Cumulative Gain (NDCG) at K for multi-label relevance.
+
+    Args:
+        sim_matrix (torch.Tensor): Similarity matrix [num_queries, num_items]
+        adj_matrix (torch.Tensor): Binary relevance matrix [num_queries, num_items]
+        k (int): Number of top items to consider
+
+    Returns:
+        torch.Tensor: Mean NDCG@K over all queries
+    """
+    def dcg_at_k(relevances: torch.Tensor, k: int) -> torch.Tensor:
+        k = min(k, relevances.size(0))
+        gains = 2 ** relevances[:k] - 1
+        discounts = torch.log2(torch.arange(k, device=relevances.device) + 2.0)
         return (gains / discounts).sum()
 
     num_queries = sim_matrix.size(0)
@@ -98,31 +91,29 @@ def compute_ndcg_at_k(sim_matrix: torch.Tensor, k: int) -> torch.Tensor:
     ndcg_scores = []
 
     for i in range(num_queries):
-        # Get scores for current query
+        # Get scores and relevance vector for query i
         scores = sim_matrix[i]
-        _, indices = torch.sort(scores, descending=True)
-        
-        # Create binary relevance vector (1 for correct match, 0 otherwise)
-        relevances = torch.zeros_like(scores)
-        relevances[i] = 1.0
-        
-        # Reorder relevances according to predicted ranking
-        relevances = relevances[indices]
-        
-        # Compute DCG
-        dcg = _dcg_at_k(relevances, k)
-        
-        # Compute IDCG (DCG with optimal ordering)
+        relevances = adj_matrix[i]  # binary vector [num_items]
+
+        # Rank items by predicted similarity
+        _, ranked_indices = torch.topk(scores, k, dim=0)
+        ranked_relevances = relevances[ranked_indices]
+
+        # Compute DCG@k for predicted ranking
+        dcg = dcg_at_k(ranked_relevances, k)
+
+        # Compute ideal DCG@k (best possible ranking of relevances)
         ideal_relevances, _ = torch.sort(relevances, descending=True)
-        idcg = _dcg_at_k(ideal_relevances, k)
-        
+        idcg = dcg_at_k(ideal_relevances, k)
+
         # Compute NDCG
         ndcg = dcg / idcg if idcg > 0 else torch.tensor(0.0, device=sim_matrix.device)
         ndcg_scores.append(ndcg)
 
     return torch.stack(ndcg_scores).mean()
 
-def compute_retrieval_metrics(sim_matrix: torch.Tensor, k_values: List[int]) -> Dict[str, torch.Tensor]:
+
+def compute_retrieval_metrics(sim_matrix: torch.Tensor, adj_matrix: torch.Tensor, k_values: List[int]) -> Dict[str, torch.Tensor]:
     """
     Compute comprehensive retrieval metrics including Precision@K, Recall@K, and NDCG@K.
     
@@ -137,9 +128,9 @@ def compute_retrieval_metrics(sim_matrix: torch.Tensor, k_values: List[int]) -> 
     
     for k in k_values:
         # Compute all metrics for current k
-        precision = compute_precision_at_k(sim_matrix, k)
-        recall = compute_recall_at_k(sim_matrix, k)
-        ndcg = compute_ndcg_at_k(sim_matrix, k)
+        precision = compute_precision_at_k(sim_matrix, adj_matrix, k)
+        recall = compute_recall_at_k(sim_matrix, adj_matrix, k)
+        ndcg = compute_ndcg_at_k(sim_matrix, adj_matrix, k)
         
         # Store in dictionary
         metrics[f'precision@{k}'] = precision
@@ -149,8 +140,8 @@ def compute_retrieval_metrics(sim_matrix: torch.Tensor, k_values: List[int]) -> 
     return metrics
 
 def compute_bidirectional_metrics(
-                                text_emb: torch.Tensor, 
-                                image_emb: torch.Tensor, 
+                                sim_matrix: torch.Tensor, 
+                                adj_matrix: torch.Tensor, 
                                 k_values: List[int]) -> Dict[str, torch.Tensor]:
     """
     Compute retrieval metrics in both directions (text→image and image→text).
@@ -163,17 +154,11 @@ def compute_bidirectional_metrics(
     Returns:
         Dict[str, torch.Tensor]: Dictionary containing all computed metrics for both directions
     """
-    # Compute similarity matrices for both directions
-    # print("shape of text_emb:", text_emb.shape, "shape of image_emb:", image_emb.shape)
-    sim_matrix_t2i = torch.matmul(text_emb, image_emb.T)
-    sim_matrix_i2t = sim_matrix_t2i.T
-    
-    # print(sim_matrix_t2i, 'shape of sim_matrix_t2i:', sim_matrix_t2i.shape, 'shape of sim_matrix_i2t:', sim_matrix_i2t.shape)
     # Compute metrics for text→image direction
-    t2i_metrics = compute_retrieval_metrics(sim_matrix_t2i, k_values)
+    t2i_metrics = compute_retrieval_metrics(sim_matrix, adj_matrix, k_values)
     
     # Compute metrics for image→text direction
-    i2t_metrics = compute_retrieval_metrics(sim_matrix_i2t, k_values)
+    i2t_metrics = compute_retrieval_metrics(sim_matrix.T, adj_matrix.T, k_values)
     
     # Combine metrics
     combined_metrics = {}
