@@ -73,7 +73,7 @@ def build_graph_from_json(
                 node_to_id[val] = node_id_counter
                 try:
                     embedding, type_ = get_clip_embedder(val, preprocess, tokenizer)
-                    node_features.append(embedding)
+                    node_features.append(embedding.squeeze(0))
                     node_types.append(type_)
                     node_id_counter += 1
                 except Exception as e:
@@ -92,7 +92,7 @@ def build_graph_from_json(
 
         try:
             link_embedding, _ = get_clip_embedder(link_text, preprocess, tokenizer)
-            edge_features.append(link_embedding)
+            edge_features.append(link_embedding.squeeze(0))
             
         except Exception as e:
             print(f"[Warning] Failed to embed link '{link_text}': {e}")

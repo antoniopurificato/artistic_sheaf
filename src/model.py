@@ -43,7 +43,7 @@ class SheafConvLayer(nn.Module):
 
         # Precompute left and right map index lookup
         self.left_idx, self.right_idx = self.compute_left_right_map_index()
-
+    
         
     def compute_left_right_map_index(self):
         """
@@ -148,6 +148,8 @@ class SheafConvLayer(nn.Module):
         if x.dim() == 3 and x.size(0) == 1:
             x = x.squeeze(0) 
         
+        self.num_nodes = x.size(0)  # Update num_nodes based on input
+
         maps = self.predict_restriction_maps(x, edge_attr)
         laplacian = self.build_laplacian(maps)
         y = self.linear(x)
@@ -187,7 +189,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         self.clip_model.eval()
         self.clip_model = self.clip_model.to(self._device)
         
-        self.edge_attr = self.clip_model.encode_text(edge_attr.squeeze(1))
+        self.edge_attr = edge_attr
         
         # Project input features into latent space
         self.input_proj = nn.Linear(self.input_dim, latent_dim).to(device) #change this for CLIP with layer fixed
@@ -203,7 +205,7 @@ class SheafMultimodalGNN(pl.LightningModule):
                 self.latent_dim,
                 self.latent_dim,
                 self.edge_index,
-                self.edge_attr.size(1),
+                512, #self.edge_attr.size(1),
                 num_nodes=self.num_nodes,
                 step_size=self.step_size,
                 device=self._device
@@ -212,13 +214,14 @@ class SheafMultimodalGNN(pl.LightningModule):
         ])
     
     def reinitialize_for_new_graph(self, new_edge_index, new_edge_attr, new_num_nodes):
-        self.edge_attr = self.clip_model.encode_text(new_edge_attr.squeeze(0).squeeze(1))
+        self.edge_attr = new_edge_attr.squeeze(0)
+        self.num_nodes = new_num_nodes
         self.convs = nn.ModuleList([
             SheafConvLayer(
                 self.latent_dim,
                 self.latent_dim,
                 new_edge_index.squeeze(0) ,
-                self.edge_attr.size(1),
+                512, #self.edge_attr.size(1),
                 num_nodes=int(new_edge_index.cpu().max().numpy()) + 1,  # Ensure num_nodes is correct
                 step_size=self.step_size,
                 device=self._device
@@ -227,7 +230,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         ])
         
     
-    def forward(self, x):
+    def forward(self, x, edge_attr):
         """
         Forward pass through the full GNN.
 
@@ -237,9 +240,12 @@ class SheafMultimodalGNN(pl.LightningModule):
         Returns:
             Tensor: Final node embeddings [num_nodes, latent_dim]
         """
+        
+        self.edge_attr = self.clip_model.encode_text(edge_attr.squeeze(0)) 
+        
         x_new = []
         for t in x:
-            t = t.squeeze(0)  # Remove batch dimension if present
+            #t = t.squeeze(0)  # Remove batch dimension if present
             if t.dim() == 2:
                 t = self.clip_model.encode_text(t)  
                 x_new.append(t)
@@ -273,13 +279,10 @@ class SheafMultimodalGNN(pl.LightningModule):
 
     def step(self, batch, batch_idx, split='train'):
         x, edge_index, edge_attr, num_texts = batch
-        
-        if batch_idx == 0:
-            self.reinitialize_for_new_graph(edge_index, edge_attr, num_texts)
-        
-        # print("edge index shape:", edge_index.shape)
+        self.reinitialize_for_new_graph(edge_index, edge_attr, len(x))
+
         # Forward pass to get all embeddings
-        embeddings = self.forward(x)
+        embeddings = self.forward(x, edge_attr)
         
         num_nodes = int(edge_index.max().item()) + 1
         # Create empty adjacency matrix
