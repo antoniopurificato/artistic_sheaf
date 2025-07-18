@@ -2,8 +2,9 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 import torch.nn.functional as F
-
+import open_clip
 from src.metrics import *
+import numpy as np
 
 class SheafConvLayer(nn.Module):
     """
@@ -38,7 +39,7 @@ class SheafConvLayer(nn.Module):
             nn.Tanh()  # keeps map values in range [-1, 1]
         ).to(device)
 
-        self.linear = nn.Linear(latent_dim, latent_dim)
+        self.linear = nn.Linear(latent_dim, latent_dim).to(device)
 
         # Precompute left and right map index lookup
         self.left_idx, self.right_idx = self.compute_left_right_map_index()
@@ -84,7 +85,7 @@ class SheafConvLayer(nn.Module):
         row, col = self.edge_index        
         x_row = x[row]  # Source node features
         x_col = x[col]  # Target node features
-        # print("shape of x_row in sheaf", x_row.shape, "shape of x_col in sheaf", x_col.shape, "shape of edge_attr in sheaf", edge_attr.shape)
+        
         edge_inputs = torch.cat([x_row.to(self.device), x_col.to(self.device), edge_attr.to(self.device)], dim=1)
         maps = self.sheaf_learner(edge_inputs)  # Output a scalar map per edge
         return maps
@@ -99,15 +100,18 @@ class SheafConvLayer(nn.Module):
         Returns:
             Sparse Tensor: Normalized Laplacian [num_nodes, num_nodes]
         """
-        row, col = self.edge_index
-        left_maps = maps[self.left_idx]
-        right_maps = maps[self.right_idx]
+        device_2 = 'gpu' if torch.cuda.is_available() else 'cpu'
+        
+        row, col = self.edge_index.to(device_2)
+        maps = maps.to(device_2)
+        left_maps = maps[self.left_idx.to(device_2)]
+        right_maps = maps[self.right_idx.to(device_2)]
 
         # Off-diagonal entries are negative product of opposite maps
         non_diag = -left_maps * right_maps  # [num_edges, 1]
 
         # Diagonal entries are sum of squared maps
-        diag = torch.zeros(self.num_nodes, device=self.device)
+        diag = torch.zeros(self.num_nodes, device=device_2)
         diag.index_add_(0, row, (maps.squeeze() ** 2))  # Accumulate per node
 
         # Normalize Laplacian
@@ -119,7 +123,7 @@ class SheafConvLayer(nn.Module):
         diag_norm = d_sqrt_inv * diag * d_sqrt_inv
 
         # Construct sparse matrix indices and values
-        diag_idx = torch.arange(self.num_nodes, device=self.device)
+        diag_idx = torch.arange(self.num_nodes, device=device_2)
         indices = torch.cat([
             torch.stack([diag_idx, diag_idx], dim=0),
             torch.stack([row, col], dim=0)
@@ -140,14 +144,14 @@ class SheafConvLayer(nn.Module):
         Returns:
             Tensor: Updated node features [num_nodes, latent_dim]
         """
+        device_2 = 'gpu' if torch.cuda.is_available() else 'cpu'
         if x.dim() == 3 and x.size(0) == 1:
             x = x.squeeze(0) 
-        # print("shape of x in sheaf"  , x.shape)
         
         maps = self.predict_restriction_maps(x, edge_attr)
         laplacian = self.build_laplacian(maps)
         y = self.linear(x)
-        x = x - self.step_size * torch.sparse.mm(laplacian, y)
+        x = x - self.step_size * torch.sparse.mm(laplacian, y.to(device_2)).to(y.device)
         return x
 
 
@@ -171,20 +175,25 @@ class SheafMultimodalGNN(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
         self.edge_index = edge_index
-        self.edge_attr = edge_attr
-        self.num_nodes = input_dim[0]
-        self.input_dim = input_dim[1]
+        self.num_nodes = input_dim
+        self.input_dim = latent_dim 
         self.latent_dim = latent_dim
         self.num_layers = num_layers
         self.step_size = step_size
         self.lr = lr
         self._device = device
 
+        self.clip_model, _, _ = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
+        self.clip_model.eval()
+        self.clip_model = self.clip_model.to(self._device)
+        
+        self.edge_attr = self.clip_model.encode_text(edge_attr.squeeze(1))
+        
         # Project input features into latent space
-        self.input_proj = nn.Linear(self.input_dim, latent_dim) #change this for CLIP with layer fixed
+        self.input_proj = nn.Linear(self.input_dim, latent_dim).to(device) #change this for CLIP with layer fixed
 
         # Final output projection
-        self.output_proj = nn.Linear(latent_dim, latent_dim)
+        self.output_proj = nn.Linear(latent_dim, latent_dim).to(device)
         
         self.initialize_convs()
         
@@ -203,21 +212,20 @@ class SheafMultimodalGNN(pl.LightningModule):
         ])
     
     def reinitialize_for_new_graph(self, new_edge_index, new_edge_attr, new_num_nodes):
-        # print(int(new_edge_index.max().numpy()) + 1)
+        self.edge_attr = self.clip_model.encode_text(new_edge_attr.squeeze(0).squeeze(1))
         self.convs = nn.ModuleList([
             SheafConvLayer(
                 self.latent_dim,
                 self.latent_dim,
                 new_edge_index.squeeze(0) ,
-                new_edge_attr.squeeze(0).size(1),
-                num_nodes=int(new_edge_index.max().numpy()) + 1,  # Ensure num_nodes is correct
+                self.edge_attr.size(1),
+                num_nodes=int(new_edge_index.cpu().max().numpy()) + 1,  # Ensure num_nodes is correct
                 step_size=self.step_size,
                 device=self._device
             )
             for _ in range(self.num_layers)
         ])
-        self.edge_attr = new_edge_attr.squeeze(0).to(self.device)
-    
+        
     
     def forward(self, x):
         """
@@ -229,8 +237,20 @@ class SheafMultimodalGNN(pl.LightningModule):
         Returns:
             Tensor: Final node embeddings [num_nodes, latent_dim]
         """
+        x_new = []
+        for t in x:
+            t = t.squeeze(0)  # Remove batch dimension if present
+            if t.dim() == 2:
+                t = self.clip_model.encode_text(t)  
+                x_new.append(t)
+            else:
+                t = self.clip_model.encode_image(t)
+                x_new.append(t)
+        x = torch.stack(x_new, dim=0).squeeze(1)
+                
         if x.dim() == 3 and x.size(0) == 1:
            x = x.squeeze(0)
+        
         h = self.input_proj(x)
 
         for conv in self.convs:
@@ -276,7 +296,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         # turn into getting the nodes that have a link (edge index)
         
         metrics = compute_bidirectional_metrics(
-            cos_sim_matrix, adj,
+            cos_sim_matrix.cpu(), adj.cpu(),
             k_values=[1, 5, 10]
         )
         

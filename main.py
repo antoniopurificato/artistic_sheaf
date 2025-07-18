@@ -37,7 +37,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42):
     Main function modified to use SheafMultimodalGNN with train/val/test splits.
     """
     # Set device
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = 'cuda' if torch.cuda.is_available() else 'mps'
     print(f"Using device: {device}")
     seed_everything(seed=seed)
     
@@ -46,16 +46,13 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42):
     val_path = os.path.join(data_folder, "val_text_image_split.json")
     test_path = os.path.join(data_folder, "test_text_image_split.json")
     
-    model, _, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
-    model = model.to('mps')
-    model.eval()  # model in train mode by default, impacts some models with BatchNorm or stochastic depth active
+    tokenizer = open_clip.get_tokenizer('ViT-B-32')
+    _,_, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     
-    # Initialize the embedder
-    # embedder = SentenceTransformer('all-MiniLM-L6-v2').to(device)
 
     # Training data
-    train_data_list = load_json_data(train_path)[:10000]
-    train_graph_data, train_node_to_id, train_edge_labels = build_graph_from_json(train_data_list, model, preprocess)
+    train_data_list = load_json_data(train_path)[:100]
+    train_graph_data, train_node_to_id, train_edge_labels, train_data_types = build_graph_from_json(train_data_list, preprocess, tokenizer)
     # Move graph data to GPU
     train_graph_data = train_graph_data.to(device)
     train_num_texts = sum(1 for node in train_node_to_id.keys() 
@@ -63,8 +60,8 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42):
     print("Loaded training data with {} text nodes.".format(train_num_texts))
     
     # Validation data
-    val_data_list = load_json_data(val_path)[:2000]
-    val_graph_data, val_node_to_id, val_edge_labels = build_graph_from_json(val_data_list, model, preprocess)
+    val_data_list = load_json_data(val_path)[:20]
+    val_graph_data, val_node_to_id, val_edge_labels, val_data_types = build_graph_from_json(val_data_list, preprocess, tokenizer)
     # Move graph data to GPU
     val_graph_data = val_graph_data.to(device)
     val_num_texts = sum(1 for node in val_node_to_id.keys() 
@@ -72,8 +69,8 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42):
     print("Loaded validation data with {} text nodes.".format(val_num_texts))
     
     # Test data
-    test_data_list = load_json_data(test_path)[:2000]
-    test_graph_data, test_node_to_id, test_edge_labels = build_graph_from_json(test_data_list, model, preprocess)
+    test_data_list = load_json_data(test_path)[:20]
+    test_graph_data, test_node_to_id, test_edge_labels, test_data_types = build_graph_from_json(test_data_list, preprocess, tokenizer)
     # Move graph data to GPU
     test_graph_data = test_graph_data.to(device)
     test_num_texts = sum(1 for node in test_node_to_id.keys() 
@@ -81,7 +78,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42):
     print("Loaded test data with {} text nodes.".format(test_num_texts))
     
     # Prepare model parameters using training data
-    input_dim = (len(train_node_to_id), train_graph_data.x.size(1))
+    input_dim = (len(train_node_to_id))
     latent_dim = 512
     
     print('initializing model with input_dim:', input_dim, 'and latent_dim:', latent_dim)
@@ -102,9 +99,9 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42):
     # Modify create_data_loader to ensure data stays on GPU
     def create_data_loader(graph_data: Data, num_nodes:int, batch_size: int = 1) -> DataLoader:
         dataset = [(
-            graph_data.x.to(device),
+            graph_data.x,
             graph_data.edge_index.to(device),
-            graph_data.edge_attr.to(device),
+            graph_data.edge_attr,
             num_nodes
         )]
         return DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -119,7 +116,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42):
     # Configure the trainer with GPU acceleration
     trainer = pl.Trainer(
         max_epochs=1000,
-        accelerator='gpu' if torch.cuda.is_available() else 'cpu',
+        accelerator='gpu' if torch.cuda.is_available() else 'mps',
         devices=1, # Use 1 GPU if  
         callbacks=[
             EarlyStopping(monitor='val_loss', patience=10),
