@@ -154,7 +154,7 @@ class SheafConvLayer(nn.Module):
         laplacian = self.build_laplacian(maps)
         y = self.linear(x)
         x = x - self.step_size * torch.sparse.mm(laplacian, y.to(device_2)).to(y.device)
-        return x
+        return x, maps
 
 
 class SheafMultimodalGNN(pl.LightningModule):
@@ -191,12 +191,14 @@ class SheafMultimodalGNN(pl.LightningModule):
         
         self.edge_attr = edge_attr
         
-        # Project input features into latent space
-        self.input_proj = nn.Linear(self.input_dim, latent_dim).to(device) #change this for CLIP with layer fixed
+        # Freeze all parameters
+        for param in self.clip_model.parameters():
+            param.requires_grad = False
 
-        # Final output projection
-        self.output_proj = nn.Linear(latent_dim, latent_dim).to(device)
-        
+        # Unfreeze only the last projection layers
+        self.clip_model.visual.proj.requires_grad = True
+        self.clip_model.text_projection.requires_grad = True
+          
         self.initialize_convs()
         
     def initialize_convs(self):
@@ -205,7 +207,7 @@ class SheafMultimodalGNN(pl.LightningModule):
                 self.latent_dim,
                 self.latent_dim,
                 self.edge_index,
-                512, #self.edge_attr.size(1),
+                512,
                 num_nodes=self.num_nodes,
                 step_size=self.step_size,
                 device=self._device
@@ -214,23 +216,22 @@ class SheafMultimodalGNN(pl.LightningModule):
         ])
     
     def reinitialize_for_new_graph(self, new_edge_index, new_edge_attr, new_num_nodes):
-        self.edge_attr = new_edge_attr.squeeze(0)
+        self.edge_attr = new_edge_attr
         self.num_nodes = new_num_nodes
         self.convs = nn.ModuleList([
             SheafConvLayer(
                 self.latent_dim,
                 self.latent_dim,
-                new_edge_index.squeeze(0) ,
-                512, #self.edge_attr.size(1),
-                num_nodes=int(new_edge_index.cpu().max().numpy()) + 1,  # Ensure num_nodes is correct
+                new_edge_index ,
+                512, 
+                num_nodes=int(new_edge_index.cpu().max().numpy()) + 1,  
                 step_size=self.step_size,
                 device=self._device
             )
             for _ in range(self.num_layers)
         ])
-        
-    
-    def forward(self, x, edge_attr):
+
+    def forward(self, x_img, x_img_idx, x_text, x_text_idx, edge_attr):
         """
         Forward pass through the full GNN.
 
@@ -241,28 +242,23 @@ class SheafMultimodalGNN(pl.LightningModule):
             Tensor: Final node embeddings [num_nodes, latent_dim]
         """
         
-        self.edge_attr = self.clip_model.encode_text(edge_attr.squeeze(0)) 
-        
-        x_new = []
-        for t in x:
-            #t = t.squeeze(0)  # Remove batch dimension if present
-            if t.dim() == 2:
-                t = self.clip_model.encode_text(t)  
-                x_new.append(t)
-            else:
-                t = self.clip_model.encode_image(t)
-                x_new.append(t)
-        x = torch.stack(x_new, dim=0).squeeze(1)
-                
-        if x.dim() == 3 and x.size(0) == 1:
-           x = x.squeeze(0)
-        
-        h = self.input_proj(x)
+        self.edge_attr = self.clip_model.encode_text(edge_attr) 
+        t_img = self.clip_model.encode_image(x_img)  # Encode image features
+        t_text = self.clip_model.encode_text(x_text)  # Encode text features
 
-        for conv in self.convs:
-            h = conv(h, self.edge_attr)
+        t = torch.empty((t_img.size(0) + t_text.size(0), self.latent_dim), device=self._device)
 
-        out = self.output_proj(h)
+        # Place A and B in their correct positions
+        t[x_img_idx] = t_img
+        t[x_text_idx] = t_text
+
+        h_stack = torch.empty((self.num_layers, t.size(0), self.latent_dim), device=self._device)
+        for i, conv in enumerate(self.convs):
+            h, _ = conv(t, self.edge_attr)
+            h_stack[i] = h
+
+        out = h_stack.mean(dim=0)
+
         return out
     
     def compute_loss_contrastive(self, cos_sim_matrix, adjacency_matrix):
@@ -277,35 +273,91 @@ class SheafMultimodalGNN(pl.LightningModule):
         loss = pos_loss + neg_loss
         return loss
 
+    def compute_mse_loss(self, cos_sim_matrix, adjacency_matrix):
+        return F.mse_loss(cos_sim_matrix, adjacency_matrix)
+
+    def get_adjacency_matrix(self, edge_index):
+        """
+        edge_index: (2, E) torch.LongTensor
+        Returns:
+            adj_matrix: (num_images, num_texts) torch.FloatTensor
+            img_to_idx, txt_to_idx: dicts mapping original IDs to indices
+        """
+        # Extract unique images and texts
+        images = torch.unique(edge_index[0, :]).tolist()
+        texts = torch.unique(edge_index[1, :]).tolist()
+
+        # Sort for consistent ordering
+        images = sorted(images)
+        texts = sorted(texts)
+
+        # Create mapping
+        img_to_idx = {img: i for i, img in enumerate(images)}
+        txt_to_idx = {txt: j for j, txt in enumerate(texts)}
+
+        # Initialize adjacency matrix
+        adj_matrix = torch.zeros((len(images), len(texts)), dtype=torch.float, device=edge_index.device)
+
+        # Fill adjacency matrix
+        for i in range(edge_index.shape[0]):
+            img_id = int(edge_index[0, i])
+            txt_id = int(edge_index[1, i])
+            adj_matrix[img_to_idx[img_id], txt_to_idx[txt_id]] = 1.0
+
+        return adj_matrix, img_to_idx, txt_to_idx
+
+
+    def get_similarity_matrix(self, embeddings, img_to_idx, txt_to_idx):
+        """
+        embeddings: torch.Tensor [N, D]
+        img_to_idx, txt_to_idx: dicts from get_adjacency_matrix
+        Returns:
+            sim_matrix: torch.Tensor [num_images, num_texts]
+        """
+        device = embeddings.device
+
+        # Reorder embeddings using index mapping
+        img_indices = torch.tensor([k for k in img_to_idx.keys()], device=device)
+        txt_indices = torch.tensor([k for k in txt_to_idx.keys()], device=device)
+
+        reordered_img_emb = embeddings[img_indices]  # [num_images, D]
+        reordered_txt_emb = embeddings[txt_indices]  # [num_texts, D]
+
+        # Normalize
+        reordered_img_emb = torch.nn.functional.normalize(reordered_img_emb, dim=1)
+        reordered_txt_emb = torch.nn.functional.normalize(reordered_txt_emb, dim=1)
+
+        # Cosine similarity (matrix multiplication)
+        sim_matrix = reordered_img_emb @ reordered_txt_emb.T  # [num_images, num_texts]
+        return sim_matrix
+
+
     def step(self, batch, batch_idx, split='train'):
-        x, edge_index, edge_attr, num_texts = batch
-        self.reinitialize_for_new_graph(edge_index, edge_attr, len(x))
+        # print(batch_idx, split, "batch size:", len(batch[0]))
+        x_img, x_img_idx, x_text, x_text_idx, edge_index, edge_attr = batch
+        edge_index = edge_index.t()
+        # print("x_img:", x_img.size(), "x_text:", x_text.size(), "edge_index:", edge_index.size(), "edge_attr:", edge_attr.size(), "x_img_idx:", x_img_idx.size(), "x_text_idx:", x_text_idx.size())
+        self.reinitialize_for_new_graph(edge_index, edge_attr, len(x_img) + len(x_text))
 
         # Forward pass to get all embeddings
-        embeddings = self.forward(x, edge_attr)
-        
-        num_nodes = int(edge_index.max().item()) + 1
-        # Create empty adjacency matrix
-        adj = torch.zeros((num_nodes, num_nodes), dtype=torch.float)
-        adj[edge_index.squeeze(0)[0], edge_index.squeeze(0)[1]] = 1.0
-        
-        src_nodes = torch.arange(num_nodes)
-        tgt_nodes = torch.arange(num_nodes)
-        src_emb = F.normalize(embeddings[src_nodes], p=2, dim=1)
-        tgt_emb = F.normalize(embeddings[tgt_nodes], p=2, dim=1)
-        cos_sim_matrix = torch.matmul(src_emb, tgt_emb.T)  # shape: [num_nodes, num_nodes]
+        embeddings = self.forward(x_img, x_img_idx, x_text, x_text_idx, edge_attr)
 
-        loss = self.compute_loss_contrastive(cos_sim_matrix, adj)
+        # Create empty adjacency matrix
+        adjacency_matrix, img_to_idx, txt_to_idx = self.get_adjacency_matrix(edge_index)
+
+        cos_sim_matrix = self.get_similarity_matrix(embeddings, img_to_idx, txt_to_idx)
+
+        loss = self.compute_mse_loss(cos_sim_matrix, adjacency_matrix)
         # turn into getting the nodes that have a link (edge index)
         
         metrics = compute_bidirectional_metrics(
-            cos_sim_matrix.cpu(), adj.cpu(),
+            cos_sim_matrix.cpu(), adjacency_matrix.cpu(),
             k_values=[1, 5, 10]
         )
         
         self.log(f'{split}_loss', loss)
         for name, value in metrics.items():
-            self.log(f'{split}_{name}', value, prog_bar=True)
+            self.log(f'{split}_{name}', value, prog_bar=True, on_epoch=True)
             
         if split == 'train':
             return loss
@@ -361,4 +413,5 @@ class SheafMultimodalGNN(pl.LightningModule):
         Returns:
             Optimizer: Adam optimizer
         """
-        return torch.optim.Adam(self.parameters(), lr=self.lr)
+        return torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()), lr=self.lr)
+

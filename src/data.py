@@ -41,6 +41,7 @@ def build_graph_from_json(
     data_list: List[Dict],
     preprocess,
     tokenizer,
+    base_folder
 ) -> Tuple[Data, Dict[str, int], List[str], List[str]]:
     """
     Builds a PyTorch Geometric graph from the JSON input.
@@ -72,7 +73,7 @@ def build_graph_from_json(
             if val not in node_to_id:
                 node_to_id[val] = node_id_counter
                 try:
-                    embedding, type_ = get_clip_embedder(val, preprocess, tokenizer)
+                    embedding, type_ = get_clip_embedder(val, preprocess, tokenizer, base_folder)
                     node_features.append(embedding.squeeze(0))
                     node_types.append(type_)
                     node_id_counter += 1
@@ -91,7 +92,7 @@ def build_graph_from_json(
         raw_edge_labels.append(link_text)
 
         try:
-            link_embedding, _ = get_clip_embedder(link_text, preprocess, tokenizer)
+            link_embedding, _ = get_clip_embedder(link_text, preprocess, tokenizer, base_folder)
             edge_features.append(link_embedding.squeeze(0))
             
         except Exception as e:
@@ -167,7 +168,7 @@ def plot_subgraph(
 
 
 def main(file_name:str, data_folder:str="data",
-         plot_subgr:bool=True) -> None:
+         plot_subgr:bool=True, base_folder:str="../wikidata_arthist/") -> None:
     """
     Main entry point for building and visualizing the graph.
     """
@@ -176,11 +177,11 @@ def main(file_name:str, data_folder:str="data",
     _,_, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     
     data_list = load_json_data(json_path)[:2000] #make it batch loading
-    graph_data, node_to_id, raw_edge_labels, data_types = build_graph_from_json(data_list, preprocess, tokenizer)
+    graph_data, node_to_id, raw_edge_labels, data_types = build_graph_from_json(data_list, preprocess, tokenizer, base_folder)
 
     if plot_subgr:
         plot_subgraph(graph_data, node_to_id, raw_edge_labels=raw_edge_labels, num_nodes=100)
 
 
 if __name__ == "__main__":
-    main(file_name="test_artist_split.json")
+    main(file_name="triplets_semart_test.json", base_folder="../SemArt/")
