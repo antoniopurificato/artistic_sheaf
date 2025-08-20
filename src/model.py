@@ -6,34 +6,6 @@ import open_clip
 from typing import Union, Tuple
 from src.metrics import *
 
-def encode_edge_attr_in_batches(
-    clip_model, 
-    edge_attr: torch.Tensor, 
-    batch_size: int = 64, 
-    device: str = 'cpu'
-) -> torch.Tensor:
-    
-    #TODO: Ludovica check
-    """
-    Encodes edge attributes in batches using a CLIP model.
-
-    Args:
-        clip_model: Pre-trained CLIP model for encoding text.
-        edge_attr (torch.Tensor): Edge attributes to be encoded [batch_size, num_edges, edge_attr_dim].
-        batch_size (int): Number of edges to process in each batch. Default is 64.
-        device (str): Device to run the computation on, either 'cpu' or 'cuda'. Default is 'cpu'.
-
-    Returns:
-        torch.Tensor: Concatenated embeddings of edge attributes [num_edges, embedding_dim].
-    """
-    embeddings = []
-    edge_attr = edge_attr.squeeze(0)
-    for i in range(0, edge_attr.size(0), batch_size):
-        batch = edge_attr[i:i+batch_size].to(device)
-        with torch.no_grad():
-            emb = clip_model.encode_text(batch)
-        embeddings.append(emb.cpu())
-    return torch.cat(embeddings, dim=0).to(device)
 
 class SheafConvLayer(nn.Module):
     """
@@ -166,32 +138,30 @@ class SheafConvLayer(nn.Module):
         laplacian = torch.sparse_coo_tensor(indices, values, (self.num_nodes, self.num_nodes))
         return laplacian.coalesce()
     
-    def forward(
-        self, 
-        x: torch.Tensor, 
-        edge_attr: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, x, edge_attr):
         """
         Forward pass through the sheaf convolution layer.
 
         Args:
-            x (torch.Tensor): Input node features [num_nodes, latent_dim].
-            edge_attr (torch.Tensor): Edge features [num_edges, edge_attr_dim].
+            x (Tensor): Input node features [num_nodes, latent_dim]
+            edge_attr (Tensor): Edge features [num_edges, edge_attr_dim]
 
         Returns:
-            torch.Tensor: Updated node features [num_nodes, latent_dim].
+            Tensor: Updated node features [num_nodes, latent_dim]
         """
-        device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device_2 = 'gpu' if torch.cuda.is_available() else 'cpu'
         if x.dim() == 3 and x.size(0) == 1:
-            x = x.squeeze(0)
-        self.num_nodes = x.size(0)  # Update num_nodes based on input
+            x = x.squeeze(0) 
         
+        self.num_nodes = x.size(0)  # Update num_nodes based on input
+
         maps = self.predict_restriction_maps(x, edge_attr)
         laplacian = self.build_laplacian(maps)
         y = self.linear(x)
         x = x - self.step_size * torch.sparse.mm(laplacian, y.to(device_2)).to(y.device)
-        return x
-
+        return x, maps
+   
+    
 class SheafMultimodalGNN(pl.LightningModule):
     def __init__(
         self, 
@@ -208,80 +178,87 @@ class SheafMultimodalGNN(pl.LightningModule):
         self.save_hyperparameters()
         self.edge_index = edge_index
         self.num_nodes = input_dim
-        self.input_dim = latent_dim
+        self.input_dim = latent_dim 
         self.latent_dim = latent_dim
         self.num_layers = num_layers
         self.step_size = step_size
         self.lr = lr
         self._device = device
-        
+
         self.clip_model, _, _ = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
         self.clip_model.eval()
         self.clip_model = self.clip_model.to(self._device)
         
-        self.edge_attr_raw = edge_attr  # keep raw, will use embedding in forward
-        self.input_proj = nn.Linear(self.input_dim, latent_dim).to(device)
-        self.output_proj = nn.Linear(latent_dim, latent_dim).to(device)
+        self.edge_attr = edge_attr
         
-        # Initialize convs after calculating edge_attr embedding
-        with torch.no_grad():
-            edge_attr_emb = encode_edge_attr_in_batches(
-                self.clip_model, edge_attr, batch_size=64, device='cuda'
-            ).to(self._device)
-        self.edge_attr_emb = edge_attr_emb
+        # Freeze all parameters
+        for param in self.clip_model.parameters():
+            param.requires_grad = False
+
+        # Unfreeze only the last projection layers
+        self.clip_model.visual.proj.requires_grad = True
+        self.clip_model.text_projection.requires_grad = True
+          
         self.initialize_convs()
     
     def initialize_convs(self):
-        edge_attr_dim = self.edge_attr_emb.size(1)
         self.convs = nn.ModuleList([
             SheafConvLayer(
-                self.latent_dim, self.latent_dim, self.edge_index, edge_attr_dim,
-                num_nodes=self.num_nodes, step_size=self.step_size, device=self._device
-            ) for _ in range(self.num_layers)
+                self.latent_dim,
+                self.latent_dim,
+                self.edge_index,
+                512,
+                num_nodes=self.num_nodes,
+                step_size=self.step_size,
+                device=self._device
+            )
+            for _ in range(self.num_layers)
         ])
     
-    def reinitialize_for_new_graph(
-        self, 
-        new_edge_index: torch.Tensor, 
-        new_edge_attr: torch.Tensor, 
-        new_num_nodes: int
-    ):
-        with torch.no_grad():
-            edge_attr_emb = self.clip_model.encode_text(new_edge_attr.squeeze(0).to(self._device))
-        self.edge_attr_emb = edge_attr_emb
+    def reinitialize_for_new_graph(self, new_edge_index, new_edge_attr, new_num_nodes):
+        self.edge_attr = new_edge_attr
         self.num_nodes = new_num_nodes
         self.convs = nn.ModuleList([
             SheafConvLayer(
-                self.latent_dim, self.latent_dim, new_edge_index.squeeze(0), edge_attr_emb.size(1),
-                num_nodes=int(new_edge_index.cpu().max().numpy()) + 1, step_size=self.step_size, device=self._device
-            ) for _ in range(self.num_layers)
+                self.latent_dim,
+                self.latent_dim,
+                new_edge_index ,
+                512, 
+                num_nodes=int(new_edge_index.cpu().max().numpy()) + 1,  
+                step_size=self.step_size,
+                device=self._device
+            )
+            for _ in range(self.num_layers)
         ])
     
-    def forward(
-        self, 
-        x: torch.Tensor, 
-        edge_attr: torch.Tensor
-    ) -> torch.Tensor:
-        # Encoding nodes (text or image)
-        x_new = []
-        for t in x:
-            if t.dim() == 2:
-                t_emb = self.clip_model.encode_text(t.to(self._device))
-            else:
-                t_emb = self.clip_model.encode_image(t.to(self._device))
-            x_new.append(t_emb)
-        x = torch.stack(x_new, dim=0).squeeze(1)
+    def forward(self, x_img, x_img_idx, x_text, x_text_idx, edge_attr):
+        """
+        Forward pass through the full GNN.
+
+        Args:
+            x (Tensor): Node features [num_nodes, input_dim] or [1, num_nodes, input_dim]
+
+        Returns:
+            Tensor: Final node embeddings [num_nodes, latent_dim]
+        """
         
-        # Encoding edge_attr every time in forward (can cache if desired)
-        edge_attr_emb = self.clip_model.encode_text(edge_attr.squeeze(0).to(self._device))
-        
-        if x.dim() == 3 and x.size(0) == 1:
-            x = x.squeeze(0)
-        
-        h = self.input_proj(x)
-        for conv in self.convs:
-            h = conv(h, edge_attr_emb)
-        out = self.output_proj(h)
+        self.edge_attr = self.clip_model.encode_text(edge_attr) 
+        t_img = self.clip_model.encode_image(x_img)  # Encode image features
+        t_text = self.clip_model.encode_text(x_text)  # Encode text features
+
+        t = torch.empty((t_img.size(0) + t_text.size(0), self.latent_dim), device=self._device)
+
+        # Place A and B in their correct positions
+        t[x_img_idx] = t_img
+        t[x_text_idx] = t_text
+
+        h_stack = torch.empty((self.num_layers, t.size(0), self.latent_dim), device=self._device)
+        for i, conv in enumerate(self.convs):
+            h, _ = conv(t, self.edge_attr)
+            h_stack[i] = h
+
+        out = h_stack.mean(dim=0)
+
         return out
     
     def compute_loss_contrastive(
@@ -300,90 +277,57 @@ class SheafMultimodalGNN(pl.LightningModule):
         )
         return loss
     
-    def compute_relation_metrics(self, batch: tuple) -> dict:
-        """
-        Compute relation-aware retrieval metrics during training/validation.
+    def step(self, batch, batch_idx, split='train'):
+        x_img, x_img_idx, x_text, x_text_idx, edge_index, edge_attr = batch
+        edge_index = edge_index.t()
+        edge_index = edge_index.flatten().argsort().argsort().view(edge_index.shape)
 
-        Args:
-            batch (tuple): Current batch of data.
+        self.reinitialize_for_new_graph(edge_index, edge_attr, len(x_img) + len(x_text))
 
-        Returns:
-            dict: Dictionary containing computed metrics.
-        """
-        x, edge_index, edge_attr, num_texts = batch
-        
-        # Get embeddings
-        embeddings = self(x, edge_attr)
-        
-        # Determine node types based on num_texts
-        node_types = ['text'] * num_texts + ['image'] * (len(x) - num_texts)
-        
-        # Ensure tensors are on the correct device
-        edge_attr = edge_attr.to(embeddings.device)
-        edge_index = edge_index.to(embeddings.device)
-        
-        # Compute metrics
-        metrics = compute_relation_aware_metrics(
-            embeddings=embeddings,
-            edge_index=edge_index,
-            edge_attr=edge_attr,
-            node_types=node_types,
-            k_values=[1, 5, 10]
-        )
-        
-        # Log metrics
-        for relation_id, relation_metrics in metrics.items():
-            for metric_name, value in relation_metrics.items():
-                self.log(f'{relation_id}_{metric_name}', value)
-        
-        return metrics
-    
-    def step(
-        self, 
-        batch: tuple, 
-        batch_idx: int, 
-        split: str = 'train'
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, dict]]:
-        x, edge_index, edge_attr, num_texts = batch
-        self.reinitialize_for_new_graph(edge_index, edge_attr, len(x))
-        
         # Forward pass to get all embeddings
-        embeddings = self(x, edge_attr)
-        num_nodes = int(edge_index.max().item()) + 1
+        embeddings = self.forward(x_img, x_img_idx, x_text, x_text_idx, edge_attr)
         
         # Create empty adjacency matrix
-        adj = torch.zeros((num_nodes, num_nodes), dtype=torch.float)
-        adj[edge_index.squeeze(0)[0], edge_index.squeeze(0)[1]] = 1.0
-        
-        src_nodes = torch.arange(num_nodes)
-        tgt_nodes = torch.arange(num_nodes)
-        src_emb = F.normalize(embeddings[src_nodes], p=2, dim=1)
-        tgt_emb = F.normalize(embeddings[tgt_nodes], p=2, dim=1)
-        cos_sim_matrix = torch.matmul(src_emb, tgt_emb.T)  # shape: [num_nodes, num_nodes]
-        
-        loss = self.compute_loss_contrastive(cos_sim_matrix, adj)
+        adjacency_matrix, img_to_idx, txt_to_idx = get_adjacency_matrix(edge_index)
+
+        cos_sim_matrix = get_similarity_matrix(embeddings, img_to_idx, txt_to_idx)
+
+        # print("Edge index", edge_index)
+        # print(f"Embeddings shape: {embeddings.shape}")
+        # print(f"Shapes of adjacency and similarity matrices: {adjacency_matrix.shape}, {cos_sim_matrix.shape}")
+        # print(f"Number of edges in adjacency matrix: {adjacency_matrix.sum().item()}, number of edges in similarity matrix: {cos_sim_matrix.sum().item()}")
+
+        loss = self.compute_loss_contrastive(cos_sim_matrix, adjacency_matrix)
         
         # Compute bidirectional metrics
         metrics = compute_bidirectional_metrics(
             cos_sim_matrix.cpu(), 
-            adj.cpu(), 
+            adjacency_matrix.cpu(), 
             k_values=[1, 5, 10]
         )
         
-        relation_metrics = self.compute_relation_metrics(batch)
+        self.log(f'{split}_loss', loss)
+        for name, value in metrics.items():
+            self.log(f'{split}_{name}', value, prog_bar=True, on_epoch=True)
+        
+        
+        # Compute metrics
+        relation_metrics = compute_relation_aware_metrics(
+            embeddings=embeddings,
+            edge_index=edge_index,
+            edge_attr=edge_attr,
+            k_values=[1, 5, 10]
+        )
+        
         for relation, value in relation_metrics.items():
             for metric_name, value in value.items():
                 self.log(f'{split}_{relation}_{metric_name}_{value}', value, prog_bar=True)
-        
-        self.log(f'{split}_loss', loss)
-        for name, value in metrics.items():
-            self.log(f'{split}_{name}', value, prog_bar=True)
-        
+            
         if split == 'train':
             return loss
         else:
             return loss, metrics
-    
+
     def training_step(self, batch: tuple, batch_idx: int) -> torch.Tensor:
         """
         Training step with symmetric contrastive loss between text and image nodes.
@@ -432,4 +376,4 @@ class SheafMultimodalGNN(pl.LightningModule):
         Returns:
             torch.optim.Optimizer: Adam optimizer
         """
-        return torch.optim.Adam(self.parameters(), lr=self.lr)
+        return torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()), lr=self.lr)

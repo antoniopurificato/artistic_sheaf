@@ -2,6 +2,52 @@ import torch
 from typing import Dict, List, Optional
 import torch.nn.functional as F
 
+def get_adjacency_matrix(edge_index):
+    """
+    edge_index: (2, E) torch.LongTensor
+    Returns:
+        adj_matrix: (num_images, num_texts) torch.FloatTensor
+        img_to_idx, txt_to_idx: dicts mapping original IDs to indices
+    """
+    # Extract unique images and texts
+    images = torch.unique(edge_index[0, :]).tolist()
+    texts = torch.unique(edge_index[1, :]).tolist()
+    # Sort for consistent ordering
+    images = sorted(images)
+    texts = sorted(texts)
+    # Create mapping
+    img_to_idx = {img: i for i, img in enumerate(images)}
+    txt_to_idx = {txt: j for j, txt in enumerate(texts)}
+    # Initialize adjacency matrix
+    adj_matrix = torch.zeros((len(images), len(texts)), dtype=torch.float, device=edge_index.device)
+    # Fill adjacency matrix
+    for i in range(edge_index.shape[1]):
+        img_id = int(edge_index[0, i])
+        txt_id = int(edge_index[1, i])
+        adj_matrix[img_to_idx[img_id], txt_to_idx[txt_id]] = 1.0
+    return adj_matrix, img_to_idx, txt_to_idx
+
+
+def get_similarity_matrix(embeddings, img_to_idx, txt_to_idx):
+    """
+    embeddings: torch.Tensor [N, D]
+    img_to_idx, txt_to_idx: dicts from get_adjacency_matrix
+    Returns:
+        sim_matrix: torch.Tensor [num_images, num_texts]
+    """
+    device = embeddings.device
+    # Reorder embeddings using index mapping
+    img_indices = torch.tensor([k for k in img_to_idx.keys()], device=device)
+    txt_indices = torch.tensor([k for k in txt_to_idx.keys()], device=device)
+    reordered_img_emb = embeddings[img_indices]  # [num_images, D]
+    reordered_txt_emb = embeddings[txt_indices]  # [num_texts, D]
+    # Normalize
+    reordered_img_emb = torch.nn.functional.normalize(reordered_img_emb, dim=1)
+    reordered_txt_emb = torch.nn.functional.normalize(reordered_txt_emb, dim=1)
+    # Cosine similarity (matrix multiplication)
+    sim_matrix = reordered_img_emb @ reordered_txt_emb.T  # [num_images, num_texts]
+    return sim_matrix
+
 
 def get_top_k_recommendations(sim_matrix: torch.Tensor, k: int):
     """
@@ -21,7 +67,6 @@ def get_top_k_recommendations(sim_matrix: torch.Tensor, k: int):
     recommended_items = top_k_indices.tolist()
 
     return recommended_items
-
 
 
 def compute_precision_at_k(sim_matrix: torch.Tensor, 
@@ -167,6 +212,7 @@ def compute_retrieval_metrics(sim_matrix: torch.Tensor, adj_matrix: torch.Tensor
     
     return metrics
 
+
 def compute_bidirectional_metrics(
                                 sim_matrix: torch.Tensor, 
                                 adj_matrix: torch.Tensor, 
@@ -209,7 +255,6 @@ def compute_relation_aware_metrics(
     embeddings: torch.Tensor,
     edge_index: torch.Tensor,
     edge_attr: torch.Tensor,
-    node_types: List[str],
     k_values: List[int],
     query_type: Optional[str] = None,
     target_type: Optional[str] = None,
@@ -231,25 +276,6 @@ def compute_relation_aware_metrics(
     Returns:
         Dict[str, Dict[str, torch.Tensor]]: Dictionary of metrics for each relation cluster
     """
-    
-    # Ensure edge_index is in the correct format [2, num_edges]
-    if edge_index.dim() == 3:
-        edge_index = edge_index.squeeze(0)  # Remove batch dimension if present
-    
-    # Normalize embeddings
-    embeddings = F.normalize(embeddings, p=2, dim=1)
-    
-    # Compute similarity matrix between all nodes
-    sim_matrix = torch.matmul(embeddings, embeddings.T)
-    
-    # Create masks for query and target types
-    text_mask = torch.tensor([t == 'text' for t in node_types], device=embeddings.device)
-    image_mask = torch.tensor([t == 'image' for t in node_types], device=embeddings.device)
-    
-    print(f"Number of text nodes: {text_mask.sum().item()}")
-    print(f"Number of image nodes: {image_mask.sum().item()}")
-    print(f"Similarity matrix stats: min={sim_matrix.min().item()}, max={sim_matrix.max().item()}, mean={sim_matrix.mean().item()}")
-    
     # Convert edge_attr to float
     edge_attr = edge_attr.float()
     if edge_attr.dim() == 3:
@@ -275,41 +301,14 @@ def compute_relation_aware_metrics(
     # Compute metrics for each unique relation type
     for rel_idx, (_, edge_indices) in enumerate(unique_relations.items()):
         # Create adjacency matrix for this relation type
-        adj_matrix = torch.zeros_like(sim_matrix)
-        for idx in edge_indices:
-            # Get source and target nodes for this edge
-            src = edge_index[0][idx].long()
-            dst = edge_index[1][idx].long()
-            
-            adj_matrix[src, dst] = 1
-            adj_matrix[dst, src] = 1  # Make it symmetric for bidirectional evaluation
+        adjacency_matrix, img_to_idx, txt_to_idx = get_adjacency_matrix(edge_index[:, edge_indices])
+        sim_matrix = get_similarity_matrix(embeddings, img_to_idx, txt_to_idx)
         
         # Skip if no edges in this relation
-        if adj_matrix.sum() == 0:
+        if adjacency_matrix.sum() == 0:
             continue
         
-        print(f"Number of edges in adjacency matrix: {adj_matrix.sum().item()}")
-            
-        # Filter based on query/target types if specified
-        if query_type and target_type:
-            query_mask = text_mask if query_type == 'text' else image_mask
-            target_mask = text_mask if target_type == 'text' else image_mask
-            
-            filtered_sim = sim_matrix[query_mask][:, target_mask]
-            filtered_adj = adj_matrix[query_mask][:, target_mask]
-            
-            # Skip if no edges after filtering
-            if filtered_adj.sum() == 0:
-                continue
-                
-            metrics = compute_retrieval_metrics(filtered_sim, filtered_adj, k_values)
-            metrics_by_relation[f"relation_{rel_idx}"] = {
-                f"{query_type}2{target_type}_{k}": v 
-                for k, v in metrics.items()
-            }
-        else:
-            # Compute bidirectional metrics
-            metrics = compute_bidirectional_metrics(sim_matrix, adj_matrix, k_values)
-            metrics_by_relation[f"relation_{rel_idx}"] = metrics
+        metrics = compute_bidirectional_metrics(sim_matrix, adjacency_matrix, k_values)
+        metrics_by_relation[f"relation_{rel_idx}"] = metrics
             
     return metrics_by_relation
