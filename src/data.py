@@ -17,10 +17,10 @@ def get_clip_embedder(itm, preprocess, tokenizer, base_folder='../wikidata_arthi
     with torch.no_grad():
         if os.path.isfile(os.path.join(base_folder, itm)):
             image = preprocess(Image.open(os.path.join(base_folder, itm))).unsqueeze(0)
-            return image, 'image'
+            return image
         else:
             text = tokenizer([itm])
-            return text, 'text'
+            return text
 
 
 def load_json_data(json_path: str) -> List[Dict]:
@@ -58,7 +58,6 @@ def build_graph_from_json(
     """
     node_to_id: Dict[str, int] = {}
     node_features: List[np.ndarray] = []
-    node_types: List[str] = []
     edge_index_list: List[List[int]] = []
     edge_features: List[np.ndarray] = []
     raw_edge_labels: List[str] = []
@@ -73,9 +72,8 @@ def build_graph_from_json(
             if val not in node_to_id:
                 node_to_id[val] = node_id_counter
                 try:
-                    embedding, type_ = get_clip_embedder(val, preprocess, tokenizer, base_folder)
+                    embedding = get_clip_embedder(val, preprocess, tokenizer, base_folder)
                     node_features.append(embedding.squeeze(0))
-                    node_types.append(type_)
                     node_id_counter += 1
                 except Exception as e:
                     print(f"[Warning] Failed to embed node '{val}': {e}")
@@ -92,7 +90,7 @@ def build_graph_from_json(
         raw_edge_labels.append(link_text)
 
         try:
-            link_embedding, _ = get_clip_embedder(link_text, preprocess, tokenizer, base_folder)
+            link_embedding = get_clip_embedder(link_text, preprocess, tokenizer, base_folder)
             edge_features.append(link_embedding.squeeze(0))
             
         except Exception as e:
@@ -104,7 +102,7 @@ def build_graph_from_json(
     edge_index = torch.tensor(edge_index_list, dtype=torch.long).t().contiguous()
     edge_attr = torch.tensor(np.stack(edge_features, axis=0))
     
-    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr), node_to_id, raw_edge_labels, node_types
+    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr), node_to_id, raw_edge_labels
 
 
 def plot_subgraph(
@@ -177,7 +175,7 @@ def main(file_name:str, data_folder:str="data",
     _,_, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     
     data_list = load_json_data(json_path)[:2000] #make it batch loading
-    graph_data, node_to_id, raw_edge_labels, data_types = build_graph_from_json(data_list, preprocess, tokenizer, base_folder)
+    graph_data, node_to_id, raw_edge_labels = build_graph_from_json(data_list, preprocess, tokenizer, base_folder)
 
     if plot_subgr:
         plot_subgraph(graph_data, node_to_id, raw_edge_labels=raw_edge_labels, num_nodes=100)

@@ -1,6 +1,7 @@
 import torch
 from typing import Dict, List, Optional
 import torch.nn.functional as F
+import open_clip
 
 def get_adjacency_matrix(edge_index):
     """
@@ -69,94 +70,126 @@ def get_top_k_recommendations(sim_matrix: torch.Tensor, k: int):
     return recommended_items
 
 
-def compute_precision_at_k(sim_matrix: torch.Tensor, 
-                           adj_matrix: torch.Tensor, 
-                           k: int) -> torch.Tensor:
-    """
-    Compute Precision@K given a similarity matrix and a ground truth adjacency matrix.
 
+def compute_clip_metrics(src_emb, tgt_emb, topk=(1, 5, 10)):
+    """
+    Computes retrieval metrics from src_emb (e.g. text) to tgt_emb (e.g. image).
+    """
+    # Ensure embeddings are normalized
+    src_emb = F.normalize(src_emb, dim=1)
+    tgt_emb = F.normalize(tgt_emb, dim=1)
+
+    # Cosine similarity matrix
+    sim_matrix = src_emb @ tgt_emb.T  # shape: [N_src, N_tgt]
+    num_samples = sim_matrix.shape[0]
+
+    # Get rankings
+    rankings = torch.argsort(sim_matrix, dim=1, descending=True)  # [N, N]
+    ground_truth = torch.arange(num_samples, device=src_emb.device).unsqueeze(1)  # [N, 1]
+
+    # Compare rank positions
+    match_ranks = (rankings == ground_truth).nonzero(as_tuple=False)[:, 1]  # rank index where correct match appears
+
+    metrics = {}
+    for k in topk:
+        recall_at_k = (match_ranks < k).float().mean().item()
+        metrics[f"Recall@{k}"] = recall_at_k
+
+    metrics["Mean Rank"] = match_ranks.float().mean().item()
+    metrics["Median Rank"] = match_ranks.median().item()
+
+    return metrics
+
+def compute_precision_at_k(sim_matrix: torch.Tensor, k: int) -> torch.Tensor:
+    """
+    Compute Precision@K for a similarity matrix.
+    
+    Precision@K measures the proportion of relevant items among the top K retrieved items.
+    
     Args:
         sim_matrix (torch.Tensor): Similarity matrix of shape [num_queries, num_items]
-        adj_matrix (torch.Tensor): Binary relevance matrix [num_queries, num_items]
-                                   where 1 means relevant, 0 means not relevant
-        k (int): Number of top items to consider
-
+        k (int): Number of items to consider
+    
     Returns:
-        torch.Tensor: Mean Precision@K score over all queries
+        torch.Tensor: Precision@K score (scalar)
     """
     num_queries = sim_matrix.size(0)
-    k = min(k, sim_matrix.size(1))
-
-
-    # Get top-k indices per query
+    k = min(k, sim_matrix.size(1))  # Ensure k doesn't exceed matrix dimension
+    
+    # Get top k indices
     _, top_k_indices = torch.topk(sim_matrix, k=k, dim=1)
     
-    #TODO: Ludovica, questo si occupa di estrarre gli id degli item suggeriti.
-    # Manca un metodo che mappa gli id nei rispettivi oggetti e possiamo capire cosa realmente sta suggerendo.
-    recommended = get_top_k_recommendations(sim_matrix=sim_matrix, k=k)
+    # Create target indices (assuming diagonal is ground truth)
+    target = torch.arange(num_queries, device=sim_matrix.device).view(-1, 1)
+    
+    # Check if target is in top k results
+    correct = (top_k_indices == target).any(dim=1)
+    
+    # Calculate precision
+    precision = correct.float().sum() / (num_queries * k)
+    
+    return precision
 
-    # Gather ground-truth relevance for top-k items
-    # Shape: [num_queries, k]
-    relevant_at_k = torch.gather(adj_matrix, dim=1, index=top_k_indices)
-
-    # Precision@k = (# relevant in top-k) / k
-    precision_per_query = relevant_at_k.sum(dim=1) / k
-
-    # Return mean precision across queries
-    return precision_per_query.mean()
-
-
-def compute_recall_at_k(sim_matrix: torch.Tensor, 
-                        adj_matrix: torch.Tensor, 
-                        k: int) -> torch.Tensor:
+def compute_recall_at_k(sim_matrix: torch.Tensor, k: int) -> torch.Tensor:
     """
-    Compute Recall@K given a similarity matrix and a binary ground-truth relevance matrix.
-
+    Compute Recall@K for a similarity matrix.
+    
+    Recall@K measures the proportion of relevant items found among the top K retrieved items.
+    In this context, each query has exactly one relevant item.
+    
     Args:
         sim_matrix (torch.Tensor): Similarity matrix of shape [num_queries, num_items]
-        adj_matrix (torch.Tensor): Binary relevance matrix [num_queries, num_items]
-        k (int): Number of top items to consider
-
+        k (int): Number of items to consider
+    
     Returns:
-        torch.Tensor: Mean Recall@K score over all queries
+        torch.Tensor: Recall@K score (scalar)
     """
     num_queries = sim_matrix.size(0)
     k = min(k, sim_matrix.size(1))
-
-    # Get top-k indices per query
+    
+    # Get top k indices
     _, top_k_indices = torch.topk(sim_matrix, k=k, dim=1)
+    
+    # Create target indices
+    target = torch.arange(num_queries, device=sim_matrix.device).view(-1, 1)
+    
+    # Check if target is in top k results
+    correct = (top_k_indices == target).any(dim=1)
+    
+    # Calculate recall (same as hit rate in this case as we have only one relevant item per query)
+    recall = correct.float().mean()
+    
+    return recall
 
-    # Get relevance at top-k indices: shape [num_queries, k]
-    relevant_at_k = torch.gather(adj_matrix, dim=1, index=top_k_indices)
-
-    # Total number of relevant items per query
-    total_relevant = adj_matrix.sum(dim=1).clamp(min=1)  # avoid division by zero
-
-    # Recall per query = (# relevant items in top-k) / (total relevant)
-    recall_per_query = relevant_at_k.sum(dim=1) / total_relevant
-
-    # Mean recall across queries
-    return recall_per_query.mean()
-
-
-def compute_ndcg_at_k(sim_matrix: torch.Tensor, 
-                      adj_matrix: torch.Tensor, 
-                      k: int) -> torch.Tensor:
+def compute_ndcg_at_k(sim_matrix: torch.Tensor, k: int) -> torch.Tensor:
     """
-    Compute Normalized Discounted Cumulative Gain (NDCG) at K for multi-label relevance.
-
+    Compute Normalized Discounted Cumulative Gain (NDCG) at K.
+    
+    NDCG measures the quality of ranking by taking into account both the relevance and 
+    position of results. It penalizes relevant items appearing lower in the ranking.
+    
     Args:
-        sim_matrix (torch.Tensor): Similarity matrix [num_queries, num_items]
-        adj_matrix (torch.Tensor): Binary relevance matrix [num_queries, num_items]
-        k (int): Number of top items to consider
-
+        sim_matrix (torch.Tensor): Similarity matrix of shape [num_queries, num_items]
+        k (int): Number of items to consider
+    
     Returns:
-        torch.Tensor: Mean NDCG@K over all queries
+        torch.Tensor: NDCG@K score (scalar)
     """
-    def dcg_at_k(relevances: torch.Tensor, k: int) -> torch.Tensor:
-        k = min(k, relevances.size(0))
-        gains = 2 ** relevances[:k] - 1
-        discounts = torch.log2(torch.arange(k, device=relevances.device) + 2.0)
+    def _dcg_at_k(relevances: torch.Tensor, k: int) -> torch.Tensor:
+        """
+        Compute Discounted Cumulative Gain (DCG) at K.
+        
+        Args:
+            relevances (torch.Tensor): Binary relevance scores
+            k (int): Number of items to consider
+        
+        Returns:
+            torch.Tensor: DCG score
+        """
+        k = min(k, len(relevances))
+        relevances = relevances[:k]
+        gains = 2**relevances - 1
+        discounts = torch.log2(torch.arange(len(relevances), device=relevances.device) + 2.0)
         return (gains / discounts).sum()
 
     num_queries = sim_matrix.size(0)
@@ -164,29 +197,31 @@ def compute_ndcg_at_k(sim_matrix: torch.Tensor,
     ndcg_scores = []
 
     for i in range(num_queries):
-        # Get scores and relevance vector for query i
+        # Get scores for current query
         scores = sim_matrix[i]
-        relevances = adj_matrix[i]  # binary vector [num_items]
-
-        # Rank items by predicted similarity
-        _, ranked_indices = torch.topk(scores, k, dim=0)
-        ranked_relevances = relevances[ranked_indices]
-
-        # Compute DCG@k for predicted ranking
-        dcg = dcg_at_k(ranked_relevances, k)
-
-        # Compute ideal DCG@k (best possible ranking of relevances)
+        _, indices = torch.sort(scores, descending=True)
+        
+        # Create binary relevance vector (1 for correct match, 0 otherwise)
+        relevances = torch.zeros_like(scores)
+        relevances[i] = 1.0
+        
+        # Reorder relevances according to predicted ranking
+        relevances = relevances[indices]
+        
+        # Compute DCG
+        dcg = _dcg_at_k(relevances, k)
+        
+        # Compute IDCG (DCG with optimal ordering)
         ideal_relevances, _ = torch.sort(relevances, descending=True)
-        idcg = dcg_at_k(ideal_relevances, k)
-
+        idcg = _dcg_at_k(ideal_relevances, k)
+        
         # Compute NDCG
         ndcg = dcg / idcg if idcg > 0 else torch.tensor(0.0, device=sim_matrix.device)
         ndcg_scores.append(ndcg)
 
     return torch.stack(ndcg_scores).mean()
 
-
-def compute_retrieval_metrics(sim_matrix: torch.Tensor, adj_matrix: torch.Tensor, k_values: List[int]) -> Dict[str, torch.Tensor]:
+def compute_retrieval_metrics(sim_matrix: torch.Tensor, k_values: List[int]) -> Dict[str, torch.Tensor]:
     """
     Compute comprehensive retrieval metrics including Precision@K, Recall@K, and NDCG@K.
     
@@ -201,9 +236,9 @@ def compute_retrieval_metrics(sim_matrix: torch.Tensor, adj_matrix: torch.Tensor
     
     for k in k_values:
         # Compute all metrics for current k
-        precision = compute_precision_at_k(sim_matrix, adj_matrix, k)
-        recall = compute_recall_at_k(sim_matrix, adj_matrix, k)
-        ndcg = compute_ndcg_at_k(sim_matrix, adj_matrix, k)
+        precision = compute_precision_at_k(sim_matrix, k)
+        recall = compute_recall_at_k(sim_matrix, k)
+        ndcg = compute_ndcg_at_k(sim_matrix, k)
         
         # Store in dictionary
         metrics[f'precision@{k}'] = precision
@@ -212,10 +247,8 @@ def compute_retrieval_metrics(sim_matrix: torch.Tensor, adj_matrix: torch.Tensor
     
     return metrics
 
-
 def compute_bidirectional_metrics(
-                                sim_matrix: torch.Tensor, 
-                                adj_matrix: torch.Tensor, 
+                                sim_matrix,
                                 k_values: List[int]) -> Dict[str, torch.Tensor]:
     """
     Compute retrieval metrics in both directions (text→image and image→text).
@@ -228,11 +261,15 @@ def compute_bidirectional_metrics(
     Returns:
         Dict[str, torch.Tensor]: Dictionary containing all computed metrics for both directions
     """
+    # Compute similarity matrices for both directions
+    sim_matrix_i2t = sim_matrix
+    sim_matrix_t2i = sim_matrix_i2t.T
+    
     # Compute metrics for text→image direction
-    t2i_metrics = compute_retrieval_metrics(sim_matrix, adj_matrix, k_values)
+    t2i_metrics = compute_retrieval_metrics(sim_matrix_t2i, k_values)
     
     # Compute metrics for image→text direction
-    i2t_metrics = compute_retrieval_metrics(sim_matrix.T, adj_matrix.T, k_values)
+    i2t_metrics = compute_retrieval_metrics(sim_matrix_i2t, k_values)
     
     # Combine metrics
     combined_metrics = {}
@@ -249,7 +286,6 @@ def compute_bidirectional_metrics(
             combined_metrics[f'mean_{metric}@{k}'] = (t2i_value + i2t_value) / 2
     
     return combined_metrics
-
 
 def compute_relation_aware_metrics(
     embeddings: torch.Tensor,
@@ -283,23 +319,22 @@ def compute_relation_aware_metrics(
     
     # Group edges by their attributes using a fingerprint of the attribute vector
     unique_relations = {}
+    tokenizer = open_clip.get_tokenizer('ViT-B-32')
     
     for i in range(len(edge_attr)):
         # Create a fingerprint of the edge attribute
         attr_vector = edge_attr[i]
-        fingerprint = (
-            float(attr_vector.sum().item()),
-            float(attr_vector.mean().item())
-        )
-        
+        fingerprint = tokenizer.decode(attr_vector.cpu().numpy()).strip('!').replace('<start_of_text>', '').replace('<end_of_text>', '' ).strip()
+
         if fingerprint not in unique_relations:
             unique_relations[fingerprint] = []
+        
         unique_relations[fingerprint].append(i)
     
     metrics_by_relation = {}
-    
+    # print(f"Found {len(unique_relations)} unique relations.")
     # Compute metrics for each unique relation type
-    for rel_idx, (_, edge_indices) in enumerate(unique_relations.items()):
+    for rel_idx, (name, edge_indices) in enumerate(unique_relations.items()):
         # Create adjacency matrix for this relation type
         adjacency_matrix, img_to_idx, txt_to_idx = get_adjacency_matrix(edge_index[:, edge_indices])
         sim_matrix = get_similarity_matrix(embeddings, img_to_idx, txt_to_idx)
@@ -309,6 +344,6 @@ def compute_relation_aware_metrics(
             continue
         
         metrics = compute_bidirectional_metrics(sim_matrix, adjacency_matrix, k_values)
-        metrics_by_relation[f"relation_{rel_idx}"] = metrics
+        metrics_by_relation[f"relation_{name}"] = metrics
             
     return metrics_by_relation

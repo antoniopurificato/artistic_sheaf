@@ -62,19 +62,22 @@ class SheafConvLayer(nn.Module):
         Returns:
             tuple: (Tensor, Tensor) Indices into left and right edge pairs.
         """
-        edge_to_idx = {}
-        for e in range(self.edge_index.size(1)):
-            s, t = self.edge_index[0, e].item(), self.edge_index[1, e].item()
-            edge_to_idx[(s, t)] = e
-        left_index, right_index = [], []
-        for e in range(self.edge_index.size(1)):
-            s, t = self.edge_index[0, e].item(), self.edge_index[1, e].item()
-            left_index.append(e)  # If reverse edge (t,s) doesn't exist, fallback to same edge
-            right_index.append(edge_to_idx.get((t, s), e))
-        return (
-            torch.tensor(left_index, device=self.device),
-            torch.tensor(right_index, device=self.device)
-        )
+        edge_to_idx = {} 
+
+        for e in range(self.edge_index.size(1)): 
+            s, t = self.edge_index[0, e].item(), self.edge_index[1, e].item() 
+            edge_to_idx[(s, t)] = e 
+        left_index, right_index = [], [] 
+        
+        for e in range(self.edge_index.size(1)): 
+            s, t = self.edge_index[0, e].item(), self.edge_index[1, e].item() 
+            left_index.append(e)  
+            # If reverse edge (t,s) doesn't exist, fallback to same edge
+            right_index.append(edge_to_idx.get((t, s), e)) 
+        
+        return (torch.tensor(left_index), 
+                torch.tensor(right_index))
+        
     
     def predict_restriction_maps(
         self, 
@@ -153,12 +156,18 @@ class SheafConvLayer(nn.Module):
         if x.dim() == 3 and x.size(0) == 1:
             x = x.squeeze(0) 
         
-        self.num_nodes = x.size(0)  # Update num_nodes based on input
+        # self.num_nodes = max(self.edge_index.max().item() + 1, x.size(0))
 
         maps = self.predict_restriction_maps(x, edge_attr)
         laplacian = self.build_laplacian(maps)
         y = self.linear(x)
         x = x - self.step_size * torch.sparse.mm(laplacian, y.to(device_2)).to(y.device)
+        
+        assert not torch.isnan(x).any(), "NaNs in input to conv"
+        assert not torch.isnan(maps).any(), "NaNs in maps"
+        assert not torch.isnan(laplacian.values()).any(), "NaNs in laplacian"
+
+       
         return x, maps
    
     
@@ -186,7 +195,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         self._device = device
 
         self.clip_model, _, _ = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
-        self.clip_model.eval()
+        # self.clip_model.eval()
         self.clip_model = self.clip_model.to(self._device)
         
         self.edge_attr = edge_attr
@@ -199,6 +208,12 @@ class SheafMultimodalGNN(pl.LightningModule):
         self.clip_model.visual.proj.requires_grad = True
         self.clip_model.text_projection.requires_grad = True
           
+        # Project input features into latent space
+        self.input_proj = nn.Linear(self.input_dim, latent_dim)
+
+        # Final output projection
+        self.output_proj = nn.Linear(latent_dim, latent_dim)
+       
         self.initialize_convs()
     
     def initialize_convs(self):
@@ -218,19 +233,9 @@ class SheafMultimodalGNN(pl.LightningModule):
     def reinitialize_for_new_graph(self, new_edge_index, new_edge_attr, new_num_nodes):
         self.edge_attr = new_edge_attr
         self.num_nodes = new_num_nodes
-        self.convs = nn.ModuleList([
-            SheafConvLayer(
-                self.latent_dim,
-                self.latent_dim,
-                new_edge_index ,
-                512, 
-                num_nodes=int(new_edge_index.cpu().max().numpy()) + 1,  
-                step_size=self.step_size,
-                device=self._device
-            )
-            for _ in range(self.num_layers)
-        ])
-    
+        self.edge_index = new_edge_index
+        self.initialize_convs()
+        
     def forward(self, x_img, x_img_idx, x_text, x_text_idx, edge_attr):
         """
         Forward pass through the full GNN.
@@ -246,12 +251,23 @@ class SheafMultimodalGNN(pl.LightningModule):
         t_img = self.clip_model.encode_image(x_img)  # Encode image features
         t_text = self.clip_model.encode_text(x_text)  # Encode text features
 
+        assert not torch.isnan(t_img).any(), "NaNs in CLIP image encoder"
+        assert not torch.isnan(t_text).any(), "NaNs in CLIP text encoder"
+
         t = torch.empty((t_img.size(0) + t_text.size(0), self.latent_dim), device=self._device)
+        
+        assert len(torch.unique(x_img_idx)) == len(x_img_idx), "Duplicate image idx"
+        # assert len(torch.unique(x_text_idx)) == len(x_text_idx), "Duplicate text idx"
 
         # Place A and B in their correct positions
         t[x_img_idx] = t_img
         t[x_text_idx] = t_text
 
+        assert (x_img_idx >= 0).all() and (x_img_idx < t.size(0)).all(), "Invalid image index"
+        assert (x_text_idx >= 0).all() and (x_text_idx < t.size(0)).all(), "Invalid text index"
+
+        t = self.input_proj(t)
+        
         h_stack = torch.empty((self.num_layers, t.size(0), self.latent_dim), device=self._device)
         for i, conv in enumerate(self.convs):
             h, _ = conv(t, self.edge_attr)
@@ -259,15 +275,62 @@ class SheafMultimodalGNN(pl.LightningModule):
 
         out = h_stack.mean(dim=0)
 
+        out = self.output_proj(out)
+        
         return out
     
-    def compute_loss_contrastive(
+    def compute_loss_contrastive(self, cos_sim_matrix):
+        margin = 0.5  # adjust as needed
+        adjacency_matrix = torch.eye(cos_sim_matrix.size(0), device=self._device) 
+        
+        pos_mask = adjacency_matrix == 1
+        neg_mask = adjacency_matrix == 0
+
+        pos_loss = (1 - cos_sim_matrix[pos_mask]).pow(2).mean()
+        neg_loss = (F.relu(cos_sim_matrix[neg_mask] - margin)).pow(2).mean()
+
+        loss = pos_loss + neg_loss
+        return loss
+    
+
+    def clip_loss(self, src_emb, tgt_emb, logit_scale=None):
+        """
+        src_emb: Tensor of shape [N, D] (e.g. text)
+        tgt_emb: Tensor of shape [N, D] (e.g. image)
+        logit_scale: Optional scalar or tensor; defaults to 1 / temperature
+        """
+        # Normalize again, in case not already
+        src_emb = F.normalize(src_emb, dim=1)
+        tgt_emb = F.normalize(tgt_emb, dim=1)
+
+        assert not torch.isnan(src_emb).any(), "NaN in src_emb"
+        assert not torch.isnan(tgt_emb).any(), "NaN in tgt_emb"
+        
+        # Default logit scale (equivalent to temperature = 1)
+        if logit_scale is None:
+            logit_scale = torch.tensor(1.0).to(src_emb.device)
+
+        # Compute logits: shape [N, N]
+        logits_per_src = logit_scale * src_emb @ tgt_emb.T
+        logits_per_tgt = logit_scale * tgt_emb @ src_emb.T
+
+        # Ground-truth: index i ↔ index i
+        labels = torch.arange(src_emb.size(0), device=src_emb.device)
+
+        # Cross-entropy in both directions
+        loss_i2t = F.cross_entropy(logits_per_src, labels)
+        loss_t2i = F.cross_entropy(logits_per_tgt, labels)
+
+        return (loss_i2t + loss_t2i) / 2
+
+    
+    def compute_loss_bce(
         self, 
         cos_sim_matrix: torch.Tensor, 
-        adjacency_matrix: torch.Tensor, 
         temperature: float = 0.07
     ) -> torch.Tensor:
         similarities = (cos_sim_matrix / temperature).sigmoid()
+        adjacency_matrix = torch.eye(cos_sim_matrix.size(0), device=self._device) 
         
         # Compute BCE loss
         loss = F.binary_cross_entropy(
@@ -277,56 +340,78 @@ class SheafMultimodalGNN(pl.LightningModule):
         )
         return loss
     
+    
     def step(self, batch, batch_idx, split='train'):
-        x_img, x_img_idx, x_text, x_text_idx, edge_index, edge_attr = batch
+        x_img, x_text, edge_index, edge_attr = batch
         edge_index = edge_index.t()
-        edge_index = edge_index.flatten().argsort().argsort().view(edge_index.shape)
+        
+        device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
+        edge_index = edge_index.to(device_2)
 
+        # Step 1: sort x to bring duplicates together
+        sorted_vals, sorted_idx = torch.sort(edge_index[0, :])
+        # Step 2: find which elements are different from the previous one
+        mask = torch.ones_like(sorted_vals, dtype=torch.bool)
+        mask[1:] = sorted_vals[1:] != sorted_vals[:-1]
+        
+        # Step 3: get the indices in the original tensor
+        if split == 'train':
+            rand_indices = torch.randperm(len(sorted_idx[mask]))
+            unique_indices = sorted_idx[mask][rand_indices]
+        else:
+            unique_indices = sorted_idx[mask]
+        
+        
+        edge_index = edge_index[:, unique_indices].to(self._device)
+        edge_attr = edge_attr[unique_indices, :]
+        
+        
+        # reindex edge per batch
+        flat_nodes = edge_index.flatten()
+        _, inverse = torch.unique(flat_nodes, sorted=False, return_inverse=True)
+        edge_index = inverse.view(2, -1)
+        
+        # now also ajust the indexing of x_img and x_text and x_img_idx and x_text_idx
+        x_img = x_img[edge_index[0, :]]
+        x_text = x_text[edge_index[1, :]]
+        x_img_idx = edge_index[0, :]
+        x_text_idx = edge_index[1, :]
+
+        
+        # edge_index = edge_index.flatten().argsort().argsort().view(edge_index.shape)
         self.reinitialize_for_new_graph(edge_index, edge_attr, len(x_img) + len(x_text))
 
         # Forward pass to get all embeddings
         embeddings = self.forward(x_img, x_img_idx, x_text, x_text_idx, edge_attr)
         
-        # Create empty adjacency matrix
-        adjacency_matrix, img_to_idx, txt_to_idx = get_adjacency_matrix(edge_index)
-
-        cos_sim_matrix = get_similarity_matrix(embeddings, img_to_idx, txt_to_idx)
-
-        # print("Edge index", edge_index)
-        # print(f"Embeddings shape: {embeddings.shape}")
-        # print(f"Shapes of adjacency and similarity matrices: {adjacency_matrix.shape}, {cos_sim_matrix.shape}")
-        # print(f"Number of edges in adjacency matrix: {adjacency_matrix.sum().item()}, number of edges in similarity matrix: {cos_sim_matrix.sum().item()}")
-
-        loss = self.compute_loss_contrastive(cos_sim_matrix, adjacency_matrix)
-        
-        # Compute bidirectional metrics
-        metrics = compute_bidirectional_metrics(
-            cos_sim_matrix.cpu(), 
-            adjacency_matrix.cpu(), 
-            k_values=[1, 5, 10]
-        )
-        
-        self.log(f'{split}_loss', loss)
-        for name, value in metrics.items():
-            self.log(f'{split}_{name}', value, prog_bar=True, on_epoch=True)
+        img_emb = F.normalize(embeddings[edge_index[0]], dim=1)
+        txt_emb = F.normalize(embeddings[edge_index[1]], dim=1)
+        loss = self.clip_loss(img_emb, txt_emb)
         
         
-        # Compute metrics
-        relation_metrics = compute_relation_aware_metrics(
-            embeddings=embeddings,
-            edge_index=edge_index,
-            edge_attr=edge_attr,
-            k_values=[1, 5, 10]
-        )
-        
-        for relation, value in relation_metrics.items():
-            for metric_name, value in value.items():
-                self.log(f'{split}_{relation}_{metric_name}_{value}', value, prog_bar=True)
+        metrics_i2t = compute_clip_metrics(img_emb, txt_emb)
+        metrics_t2i = compute_clip_metrics(txt_emb, img_emb)
+        self.log(f'{split}_loss', loss, prog_bar=True, on_epoch=True, on_step=False,)
+        for name, value in metrics_i2t.items():
+            self.log(f'{split}_i2t_{name}', value, prog_bar=True, on_epoch=True, on_step=False,)
+        for name, value in metrics_t2i.items():
+            self.log(f'{split}_t2i_{name}', value, prog_bar=True, on_epoch=True, on_step=False,)
+    
+       
+        # if split == 'val' or split == 'test':
+        #     # Compute metrics
+        #     relation_metrics = compute_relation_aware_metrics(
+        #         embeddings=embeddings,
+        #         edge_index=edge_index,
+        #         edge_attr=edge_attr,
+        #         k_values=[1, 5, 10]
+        #     )
             
-        if split == 'train':
-            return loss
-        else:
-            return loss, metrics
+        #     for relation, value in relation_metrics.items():
+        #         for metric_name, value in value.items():
+        #             self.log(f'{split}_{relation}_{metric_name}', value, prog_bar=True, on_epoch=True, on_step=False,)
+            
+        return loss, metrics_i2t, metrics_t2i
 
     def training_step(self, batch: tuple, batch_idx: int) -> torch.Tensor:
         """
@@ -339,8 +424,9 @@ class SheafMultimodalGNN(pl.LightningModule):
         Returns:
             torch.Tensor: Total loss
         """
-        return self.step(batch, batch_idx, split='train')
-    
+        train_loss, metrics_i2t, metrics_t2i = self.step(batch, batch_idx, split='train')
+        return {'loss': train_loss, **{f'train_i2t_{k}': v for k, v in metrics_i2t.items()} , **{f'train_t2i_{k}': v for k, v in metrics_t2i.items()}}
+
     def validation_step(self, batch: tuple, batch_idx: int) -> dict:
         """
         Validation step to evaluate model performance on validation data.
@@ -352,9 +438,9 @@ class SheafMultimodalGNN(pl.LightningModule):
         Returns:
             dict: Dictionary containing validation metrics
         """
-        val_loss, metrics = self.step(batch, batch_idx, split='val')
-        return {'val_loss': val_loss, **{f'val_{k}': v for k, v in metrics.items()}}
-    
+        val_loss, metrics_i2t, metrics_t2i = self.step(batch, batch_idx, split='val')
+        return {'val_loss': val_loss, **{f'val_i2t_{k}': v for k, v in metrics_i2t.items()} , **{f'val_t2i_{k}': v for k, v in metrics_t2i.items()}}
+
     def test_step(self, batch: tuple, batch_idx: int) -> dict:
         """
         Test step to evaluate model performance on test data.
@@ -366,9 +452,9 @@ class SheafMultimodalGNN(pl.LightningModule):
         Returns:
             dict: Dictionary containing test metrics
         """
-        test_loss, metrics = self.step(batch, batch_idx, split='test')
-        return {f'test_{k}': v for k, v in metrics.items()}
-    
+        _, metrics_i2t, metrics_t2i = self.step(batch, batch_idx, split='test')
+        return {f'test_i2t_{k}': v for k, v in metrics_i2t.items()} , {f'test_t2i_{k}': v for k, v in metrics_t2i.items()}
+
     def configure_optimizers(self) -> torch.optim.Optimizer:
         """
         Configures the optimizer.
