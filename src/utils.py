@@ -76,7 +76,5 @@ def process_batch(batch, split='train'):
     # now also ajust the indexing of x_img and x_text and x_img_idx and x_text_idx
     x_img = x_img[edge_index[0, :]]
     x_text = x_text[edge_index[1, :]]
-    x_img_idx = edge_index[0, :]
-    x_text_idx = edge_index[1, :]
     
-    return x_img, x_text, edge_index, edge_attr, x_img_idx, x_text_idx
+    return x_img, x_text, edge_index, edge_attr

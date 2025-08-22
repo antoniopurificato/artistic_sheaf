@@ -30,13 +30,13 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     
  
     # Training data
-    train_data_list = load_json_data(train_path)[-5000:]
+    train_data_list = load_json_data(train_path)#[-5000:]
     train_graph_data, train_node_to_id, train_edge_labels = build_graph_from_json(train_data_list, preprocess, tokenizer, base_folder=base_folder)
     train_graph_data = train_graph_data.to(device)
     print("Loaded training data with {} nodes.".format(len(train_node_to_id.keys())))
     
     # Validation data
-    val_data_list = load_json_data(val_path)[:1000]
+    val_data_list = load_json_data(val_path)#[:1000]
     val_graph_data, val_node_to_id, val_edge_labels = build_graph_from_json(val_data_list, preprocess, tokenizer, base_folder=base_folder)
     val_graph_data = val_graph_data.to(device)
     print("Loaded val data with {} nodes.".format(len(val_node_to_id.keys())))
@@ -55,15 +55,13 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     
     # Initialize the model
     model = SheafMultimodalGNN(
-        input_dim=input_dim,
-        latent_dim=latent_dim,
-        edge_index=train_graph_data.edge_index,
-        edge_attr=train_graph_data.edge_attr,
+        latent_dim=512,
+        edge_attr_dim=512,
         num_layers=3,
         step_size=1.0,
-        lr=1e-3,
-        device=device
-    ).to(device)
+        lr=1e-4,
+        device='cuda' if torch.cuda.is_available() else 'mps'
+    )
     
     
     print("Creating data loaders...")
