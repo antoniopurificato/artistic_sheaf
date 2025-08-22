@@ -1,3 +1,4 @@
+from fileinput import filename
 import json
 import torch
 import numpy as np
@@ -16,7 +17,18 @@ def get_clip_embedder(itm, preprocess, tokenizer, base_folder='../wikidata_arthi
     
     with torch.no_grad():
         if os.path.isfile(os.path.join(base_folder, itm)):
-            image = preprocess(Image.open(os.path.join(base_folder, itm))).unsqueeze(0)
+            try:
+                img = Image.open(os.path.join(base_folder, itm)).convert("RGB")  # force RGB
+                img.verify()  # check if corrupt
+                image = preprocess(img).unsqueeze(0)
+            except Exception as e:
+                print(f"Error loading image {os.path.join(base_folder, itm)}: {e}")
+                image = torch.zeros((1, 3, 224, 224))  # placeholder or skip
+            
+            if not torch.isfinite(image).all():
+                print("⚠️ Non-finite values in image", itm)
+                image = torch.nan_to_num(image, nan=0.0, posinf=1.0, neginf=0.0)
+
             return image
         else:
             text = tokenizer([itm])

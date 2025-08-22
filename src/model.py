@@ -5,7 +5,8 @@ import torch.nn.functional as F
 import open_clip
 from typing import Union, Tuple
 from src.metrics import *
-
+from src.losses import clip_loss
+from src.utils import process_batch
 
 class SheafConvLayer(nn.Module):
     """
@@ -194,19 +195,17 @@ class SheafMultimodalGNN(pl.LightningModule):
         self.lr = lr
         self._device = device
 
+        self.edge_attr = edge_attr
+        
         self.clip_model, _, _ = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
         # self.clip_model.eval()
         self.clip_model = self.clip_model.to(self._device)
-        
-        self.edge_attr = edge_attr
-        
         # Freeze all parameters
         for param in self.clip_model.parameters():
             param.requires_grad = False
-
         # Unfreeze only the last projection layers
-        self.clip_model.visual.proj.requires_grad = True
-        self.clip_model.text_projection.requires_grad = True
+        # self.clip_model.visual.proj.requires_grad = True
+        # self.clip_model.text_projection.requires_grad = True
           
         # Project input features into latent space
         self.input_proj = nn.Linear(self.input_dim, latent_dim)
@@ -251,6 +250,9 @@ class SheafMultimodalGNN(pl.LightningModule):
         t_img = self.clip_model.encode_image(x_img)  # Encode image features
         t_text = self.clip_model.encode_text(x_text)  # Encode text features
 
+        if torch.isnan(t_img).any():
+            print(x_img.min(), x_img.max())
+            
         assert not torch.isnan(t_img).any(), "NaNs in CLIP image encoder"
         assert not torch.isnan(t_text).any(), "NaNs in CLIP text encoder"
 
@@ -263,131 +265,45 @@ class SheafMultimodalGNN(pl.LightningModule):
         t[x_img_idx] = t_img
         t[x_text_idx] = t_text
 
+        assert (t != 0).any(dim=1).all(), "Some rows in t are all zeros — embeddings not assigned?"
+
         assert (x_img_idx >= 0).all() and (x_img_idx < t.size(0)).all(), "Invalid image index"
         assert (x_text_idx >= 0).all() and (x_text_idx < t.size(0)).all(), "Invalid text index"
 
+        assert not torch.isnan(t).any(), "NaNs before input_proj"
         t = self.input_proj(t)
-        
+        assert not torch.isnan(t).any(), "NaNs after input_proj"
+
         h_stack = torch.empty((self.num_layers, t.size(0), self.latent_dim), device=self._device)
         for i, conv in enumerate(self.convs):
             h, _ = conv(t, self.edge_attr)
             h_stack[i] = h
 
         out = h_stack.mean(dim=0)
-
         out = self.output_proj(out)
         
+        self.log("emb_norm/img", t_img.norm(dim=1).mean())
+        self.log("emb_norm/text", t_text.norm(dim=1).mean())
+        self.log("emb_norm/final", out.norm(dim=1).mean())
+
         return out
     
-    def compute_loss_contrastive(self, cos_sim_matrix):
-        margin = 0.5  # adjust as needed
-        adjacency_matrix = torch.eye(cos_sim_matrix.size(0), device=self._device) 
-        
-        pos_mask = adjacency_matrix == 1
-        neg_mask = adjacency_matrix == 0
-
-        pos_loss = (1 - cos_sim_matrix[pos_mask]).pow(2).mean()
-        neg_loss = (F.relu(cos_sim_matrix[neg_mask] - margin)).pow(2).mean()
-
-        loss = pos_loss + neg_loss
-        return loss
-    
-
-    def clip_loss(self, src_emb, tgt_emb, logit_scale=None):
-        """
-        src_emb: Tensor of shape [N, D] (e.g. text)
-        tgt_emb: Tensor of shape [N, D] (e.g. image)
-        logit_scale: Optional scalar or tensor; defaults to 1 / temperature
-        """
-        # Normalize again, in case not already
-        src_emb = F.normalize(src_emb, dim=1)
-        tgt_emb = F.normalize(tgt_emb, dim=1)
-
-        assert not torch.isnan(src_emb).any(), "NaN in src_emb"
-        assert not torch.isnan(tgt_emb).any(), "NaN in tgt_emb"
-        
-        # Default logit scale (equivalent to temperature = 1)
-        if logit_scale is None:
-            logit_scale = torch.tensor(1.0).to(src_emb.device)
-
-        # Compute logits: shape [N, N]
-        logits_per_src = logit_scale * src_emb @ tgt_emb.T
-        logits_per_tgt = logit_scale * tgt_emb @ src_emb.T
-
-        # Ground-truth: index i ↔ index i
-        labels = torch.arange(src_emb.size(0), device=src_emb.device)
-
-        # Cross-entropy in both directions
-        loss_i2t = F.cross_entropy(logits_per_src, labels)
-        loss_t2i = F.cross_entropy(logits_per_tgt, labels)
-
-        return (loss_i2t + loss_t2i) / 2
-
-    
-    def compute_loss_bce(
-        self, 
-        cos_sim_matrix: torch.Tensor, 
-        temperature: float = 0.07
-    ) -> torch.Tensor:
-        similarities = (cos_sim_matrix / temperature).sigmoid()
-        adjacency_matrix = torch.eye(cos_sim_matrix.size(0), device=self._device) 
-        
-        # Compute BCE loss
-        loss = F.binary_cross_entropy(
-            similarities, 
-            adjacency_matrix.float().to(similarities.device), 
-            reduction='mean'
-        )
-        return loss
-    
-    
     def step(self, batch, batch_idx, split='train'):
-        x_img, x_text, edge_index, edge_attr = batch
-        edge_index = edge_index.t()
         
-        device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
-        edge_index = edge_index.to(device_2)
-
-        # Step 1: sort x to bring duplicates together
-        sorted_vals, sorted_idx = torch.sort(edge_index[0, :])
-        # Step 2: find which elements are different from the previous one
-        mask = torch.ones_like(sorted_vals, dtype=torch.bool)
-        mask[1:] = sorted_vals[1:] != sorted_vals[:-1]
+        x_img, x_text, edge_index, edge_attr, x_img_idx, x_text_idx = process_batch(batch, split=split)
         
-        # Step 3: get the indices in the original tensor
-        if split == 'train':
-            rand_indices = torch.randperm(len(sorted_idx[mask]))
-            unique_indices = sorted_idx[mask][rand_indices]
-        else:
-            unique_indices = sorted_idx[mask]
-        
-        
-        edge_index = edge_index[:, unique_indices].to(self._device)
-        edge_attr = edge_attr[unique_indices, :]
-        
-        
-        # reindex edge per batch
-        flat_nodes = edge_index.flatten()
-        _, inverse = torch.unique(flat_nodes, sorted=False, return_inverse=True)
-        edge_index = inverse.view(2, -1)
-        
-        # now also ajust the indexing of x_img and x_text and x_img_idx and x_text_idx
-        x_img = x_img[edge_index[0, :]]
-        x_text = x_text[edge_index[1, :]]
-        x_img_idx = edge_index[0, :]
-        x_text_idx = edge_index[1, :]
-
-        
-        # edge_index = edge_index.flatten().argsort().argsort().view(edge_index.shape)
         self.reinitialize_for_new_graph(edge_index, edge_attr, len(x_img) + len(x_text))
 
         # Forward pass to get all embeddings
         embeddings = self.forward(x_img, x_img_idx, x_text, x_text_idx, edge_attr)
         
-        img_emb = F.normalize(embeddings[edge_index[0]], dim=1)
-        txt_emb = F.normalize(embeddings[edge_index[1]], dim=1)
-        loss = self.clip_loss(img_emb, txt_emb)
+        img_emb = F.normalize(embeddings[x_img_idx], dim=1)
+        txt_emb = F.normalize(embeddings[x_text_idx], dim=1)
         
+        sim_matrix = img_emb @ txt_emb.T
+        print("Similarity matrix (val):", sim_matrix[:5, :5])
+
+        loss = clip_loss(img_emb, txt_emb)
         
         metrics_i2t = compute_clip_metrics(img_emb, txt_emb)
         metrics_t2i = compute_clip_metrics(txt_emb, img_emb)
@@ -425,6 +341,13 @@ class SheafMultimodalGNN(pl.LightningModule):
             torch.Tensor: Total loss
         """
         train_loss, metrics_i2t, metrics_t2i = self.step(batch, batch_idx, split='train')
+        
+        # Debug: check gradients
+        for name, param in self.named_parameters():
+            if param.requires_grad and param.grad is not None:
+                self.log(f'grad_norm/{name}', param.grad.norm(), on_step=True, prog_bar=False)
+
+
         return {'loss': train_loss, **{f'train_i2t_{k}': v for k, v in metrics_i2t.items()} , **{f'train_t2i_{k}': v for k, v in metrics_t2i.items()}}
 
     def validation_step(self, batch: tuple, batch_idx: int) -> dict:

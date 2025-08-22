@@ -1,7 +1,6 @@
 import os
 import torch
 import pytorch_lightning as pl
-# from torch.utils.data import DataLoader
 from torch_geometric.data import DataLoader
 
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
@@ -9,7 +8,7 @@ import open_clip
 
 from src.data import *
 from src.model import *
-from src.utils import seed_everything, GraphEdgeDataset, custom_collate_fn
+from src.utils import seed_everything, GraphEdgeDataset
 
 def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_size:int=1, 
          base_folder: str = "../wikidata_arthist/"):
@@ -29,9 +28,9 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     tokenizer = open_clip.get_tokenizer('ViT-B-32')
     _,_, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     
-
+ 
     # Training data
-    train_data_list = load_json_data(train_path)[:5000]
+    train_data_list = load_json_data(train_path)[-5000:]
     train_graph_data, train_node_to_id, train_edge_labels = build_graph_from_json(train_data_list, preprocess, tokenizer, base_folder=base_folder)
     train_graph_data = train_graph_data.to(device)
     print("Loaded training data with {} nodes.".format(len(train_node_to_id.keys())))
@@ -69,9 +68,9 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     
     print("Creating data loaders...")
     train_dataset = GraphEdgeDataset(train_graph_data)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)#, collate_fn=custom_collate_fn)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_dataset = GraphEdgeDataset(val_graph_data)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)#, collate_fn=custom_collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     # test_dataset = GraphEdgeDataset(test_graph_data)
     # test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
