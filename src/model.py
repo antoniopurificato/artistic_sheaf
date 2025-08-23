@@ -176,6 +176,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         
         for param in self.clip_model.parameters():
             param.requires_grad = False
+        
         #self.clip_model.visual.proj.requires_grad = True
         #self.clip_model.text_projection.requires_grad = True
         
@@ -214,12 +215,13 @@ class SheafMultimodalGNN(pl.LightningModule):
         assert not torch.isnan(t_img).any(), "NaNs in CLIP image encoder"
         assert not torch.isnan(t_text).any(), "NaNs in CLIP text encoder"
 
-        t = torch.empty((t_img.size(0) + t_text.size(0), self.latent_dim), device=self._device)
-        
+        t = torch.empty((edge_index.max().item() + 1, self.latent_dim), device=self._device)
+
+        print(edge_index.min(), edge_index.max())
         x_img_idx = edge_index[0, :]
         x_text_idx = edge_index[1, :]
         
-        assert len(torch.unique(x_img_idx)) == len(x_img_idx), "Duplicate image idx"
+        #assert len(torch.unique(x_img_idx)) == len(x_img_idx), "Duplicate image idx"
         # assert len(torch.unique(x_text_idx)) == len(x_text_idx), "Duplicate text idx"
 
         # Place A and B in their correct positions
@@ -227,7 +229,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         t[x_text_idx] = t_text
 
         self.num_nodes = t.size(0)
-        print('number of nodes', self.num_nodes)
+        #print('number of nodes', self.num_nodes)
         
         if not (t != 0).any(dim=1).all():
             print("Warning: Some rows in t are all zeros — embeddings not assigned?")
@@ -266,7 +268,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         txt_emb = F.normalize(embeddings[edge_index[1, :]], dim=1)
 
         sim_matrix = img_emb @ txt_emb.T
-        print("Similarity matrix (val):", sim_matrix[:5, :5])
+        print("Similarity matrix (val):", sim_matrix[:10, :10])
 
         loss = clip_loss(img_emb, txt_emb)
         

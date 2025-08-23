@@ -31,35 +31,28 @@ def predict_test_scores(checkpoint_path: str,
     _, _, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     
     # Load test data
-    test_data_list = load_json_data(test_path)
+    test_data_list = load_json_data(test_path)#[:1000]
     test_graph_data, test_node_to_id, test_edge_labels = build_graph_from_json(test_data_list, preprocess, tokenizer, base_folder=base_folder)
     test_graph_data = test_graph_data.to(device)
     print("Loaded test data with {} nodes.".format(len(test_node_to_id.keys())))
 
-    # Model parameters (should match training)
-    input_dim = len(test_node_to_id)  # or hardcode to training input_dim
-    latent_dim = 512
-    
     # Initialize the model
     model = SheafMultimodalGNN(
-        input_dim=input_dim,
-        latent_dim=latent_dim,
-        edge_index=test_graph_data.edge_index,
-        edge_attr=test_graph_data.edge_attr,
+        latent_dim=512,
+        edge_attr_dim=512,
         num_layers=3,
         step_size=1.0,
-        lr=1e-3,
-        device=device
-    ).to(device)
-    
+        lr=1e-4,
+        device='cuda' if torch.cuda.is_available() else 'mps'
+    )
     
     print("Creating data loaders...")
     test_dataset = GraphEdgeDataset(test_graph_data)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=False)
 
     # Load checkpoint
-    # checkpoint = torch.load(checkpoint_path, map_location=device)
-    # model.load_state_dict(checkpoint['state_dict'])
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint['state_dict'])
     model = model.to(device)
     model.eval()
     
@@ -84,12 +77,12 @@ def predict_test_scores(checkpoint_path: str,
     
     plot_subgraph(test_graph_data.cpu(), test_node_to_id, 
                 raw_edge_labels=test_edge_labels, 
-                num_nodes=12,
+                num_nodes=100,
                 save_path="figures/test_graph_trained.png")
 
     
     
 if __name__ == "__main__":
-    checkpoint = "checkpoints/sheaf-gnn-epoch=02-val_loss=2.99.ckpt"
+    checkpoint = "checkpoints/sheaf-gnn-epoch=18-val_loss=3.03.ckpt"
     test_path = "data/triplets_semart_test.json"
-    scores = predict_test_scores(checkpoint, test_path, batch_size=128, seed=42, base_folder='../SemArt/')
+    scores = predict_test_scores(checkpoint, test_path, seed=42, base_folder='../SemArt/')

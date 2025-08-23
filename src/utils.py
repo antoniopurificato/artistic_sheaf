@@ -48,6 +48,9 @@ def process_batch(batch, split='train'):
     x_img, x_text, edge_index, edge_attr = batch
     edge_index = edge_index.t()
     
+    if split == 'test':
+        return x_img, x_text, edge_index, edge_attr
+    
     device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
     edge_index = edge_index.to(device_2)
     # Step 1: sort x to bring duplicates together
@@ -66,13 +69,13 @@ def process_batch(batch, split='train'):
     
     edge_index = edge_index[:, unique_indices].to(edge_attr.device)
     edge_attr = edge_attr[unique_indices, :]
-    
-    
+
+
     # reindex edge per batch
     flat_nodes = edge_index.flatten()
     _, inverse = torch.unique(flat_nodes, sorted=False, return_inverse=True)
     edge_index = inverse.view(2, -1)
-    
+        
     # now also ajust the indexing of x_img and x_text and x_img_idx and x_text_idx
     x_img = x_img[edge_index[0, :]]
     x_text = x_text[edge_index[1, :]]

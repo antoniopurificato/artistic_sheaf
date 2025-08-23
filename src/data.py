@@ -53,7 +53,8 @@ def build_graph_from_json(
     data_list: List[Dict],
     preprocess,
     tokenizer,
-    base_folder
+    base_folder,
+    item2 = 'item2'
 ) -> Tuple[Data, Dict[str, int], List[str], List[str]]:
     """
     Builds a PyTorch Geometric graph from the JSON input.
@@ -78,7 +79,7 @@ def build_graph_from_json(
 
     for item in tqdm(data_list):
         # Process nodes: 'sentence' and 'image_path'
-        for key in ['item1', 'item2']:
+        for key in ['item1', item2]:
             val = str(item.get(key, ""))  # Convert non-string to string if needed
 
             if val not in node_to_id:
@@ -94,7 +95,7 @@ def build_graph_from_json(
 
         # Create edge
         src = node_to_id[str(item.get('item1', ''))]
-        dst = node_to_id[str(item.get('item2', ''))]
+        dst = node_to_id[str(item.get(item2, ''))]
         edge_index_list.append([src, dst])
 
         # Process edge feature: 'link'
