@@ -21,11 +21,11 @@ def seed_everything(seed: int = 42) -> None:
         torch.cuda.manual_seed(seed)
         
 class GraphEdgeDataset(torch.utils.data.Dataset):
-    def __init__(self, graph_data: Data):
+    def __init__(self, graph_data: Data, device):
         self.edge_indices = graph_data.edge_index.t()
         self.edge_attrs = graph_data.edge_attr
         self.x = graph_data.x
-        self.device = 'cuda' if torch.cuda.is_available() else 'mps'
+        self.device = device
         
     def __len__(self):
         return len(self.edge_indices)
@@ -59,25 +59,26 @@ def process_batch(batch, split='train'):
     mask = torch.ones_like(sorted_vals, dtype=torch.bool)
     mask[1:] = sorted_vals[1:] != sorted_vals[:-1]
     
+    print(f"Unique indices: {sorted_vals[mask]}")
+    
     # Step 3: get the indices in the original tensor
     if split == 'train':
         rand_indices = torch.randperm(len(sorted_idx[mask]))
         unique_indices = sorted_idx[mask][rand_indices]
     else:
         unique_indices = sorted_idx[mask]
-    
-    
+        
     edge_index = edge_index[:, unique_indices].to(edge_attr.device)
     edge_attr = edge_attr[unique_indices, :]
 
-
     # reindex edge per batch
-    flat_nodes = edge_index.flatten()
-    _, inverse = torch.unique(flat_nodes, sorted=False, return_inverse=True)
-    edge_index = inverse.view(2, -1)
-        
-    # now also ajust the indexing of x_img and x_text and x_img_idx and x_text_idx
-    x_img = x_img[edge_index[0, :]]
-    x_text = x_text[edge_index[1, :]]
+    images = edge_index[0]
+    texts = edge_index[1]
+    _, unique_images = torch.unique(images, sorted=False, return_inverse=True)
+    _, unique_texts = torch.unique(texts, sorted=False, return_inverse=True)
+    edge_index_reconstruced = torch.stack([unique_images, unique_texts])
     
-    return x_img, x_text, edge_index, edge_attr
+    x_img = x_img[edge_index_reconstruced[0, :]]
+    x_text = x_text[edge_index_reconstruced[1, :]]
+    
+    return x_img, x_text, edge_index_reconstruced, edge_attr

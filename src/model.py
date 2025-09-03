@@ -132,7 +132,7 @@ class SheafConvLayer(nn.Module):
         Returns:
             Tensor: Updated node features [num_nodes, latent_dim]
         """
-        device_2 = 'gpu' if torch.cuda.is_available() else 'cpu'
+        device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
         if x.dim() == 3 and x.size(0) == 1:
             x = x.squeeze(0) 
         
@@ -148,7 +148,6 @@ class SheafConvLayer(nn.Module):
         assert not torch.isnan(laplacian.values()).any(), "NaNs in laplacian"
 
         return x, maps
-   
     
 class SheafMultimodalGNN(pl.LightningModule):
     def __init__(
@@ -215,9 +214,8 @@ class SheafMultimodalGNN(pl.LightningModule):
         assert not torch.isnan(t_img).any(), "NaNs in CLIP image encoder"
         assert not torch.isnan(t_text).any(), "NaNs in CLIP text encoder"
 
-        t = torch.empty((edge_index.max().item() + 1, self.latent_dim), device=self._device)
+        t = torch.empty((edge_index.max().item()+1, self.latent_dim), device=self._device)
 
-        print(edge_index.min(), edge_index.max())
         x_img_idx = edge_index[0, :]
         x_text_idx = edge_index[1, :]
         
