@@ -215,18 +215,20 @@ class SheafMultimodalGNN(pl.LightningModule):
         assert not torch.isnan(t_img).any(), "NaNs in CLIP image encoder"
         assert not torch.isnan(t_text).any(), "NaNs in CLIP text encoder"
 
-        t = torch.empty((edge_index.max().item() + 1, self.latent_dim), device=self._device)
-
-        print(edge_index.min(), edge_index.max())
-        x_img_idx = edge_index[0, :]
-        x_text_idx = edge_index[1, :]
+        t = torch.cat([t_img, t_text], dim=0).view(-1, self.latent_dim)
+        edge_index[1, :] += t_img.size(0)  # Shift text node indices
+        # t = torch.empty((edge_index.max().item() + 1, self.latent_dim), device=self._device)
         
-        #assert len(torch.unique(x_img_idx)) == len(x_img_idx), "Duplicate image idx"
-        # assert len(torch.unique(x_text_idx)) == len(x_text_idx), "Duplicate text idx"
+        # # print(edge_index.min(), edge_index.max())
+        # x_img_idx = edge_index[0, :]
+        # x_text_idx = edge_index[1, :]
+        
+        # #assert len(torch.unique(x_img_idx)) == len(x_img_idx), "Duplicate image idx"
+        # # assert len(torch.unique(x_text_idx)) == len(x_text_idx), "Duplicate text idx"
 
-        # Place A and B in their correct positions
-        t[x_img_idx] = t_img
-        t[x_text_idx] = t_text
+        # # Place A and B in their correct positions
+        # t[x_img_idx] = t_img
+        # t[x_text_idx] = t_text
 
         self.num_nodes = t.size(0)
         #print('number of nodes', self.num_nodes)
@@ -236,11 +238,11 @@ class SheafMultimodalGNN(pl.LightningModule):
             # show which rows are all zeros and whether they appear in x_img_idx or x_text_idx
             zero_rows = (t == 0).all(dim=1)
             print("Zero rows:", zero_rows.nonzero(as_tuple=True)[0])
-            print("Image indices:", x_img_idx)
-            print("Text indices:", x_text_idx)
+            # print("Image indices:", x_img_idx)
+            # print("Text indices:", x_text_idx)
 
-        assert (x_img_idx >= 0).all() and (x_img_idx < t.size(0)).all(), "Invalid image index"
-        assert (x_text_idx >= 0).all() and (x_text_idx < t.size(0)).all(), "Invalid text index"
+        # assert (x_img_idx >= 0).all() and (x_img_idx < t.size(0)).all(), "Invalid image index"
+        # assert (x_text_idx >= 0).all() and (x_text_idx < t.size(0)).all(), "Invalid text index"
 
         assert not torch.isnan(t).any(), "NaNs before input_proj"
         t = self.input_proj(t)
@@ -255,14 +257,14 @@ class SheafMultimodalGNN(pl.LightningModule):
         out = torch.stack(h_list, dim=0).mean(dim=0)
         out = self.output_proj(out)
         
-        return out
+        return out, edge_index
     
     def step(self, batch, batch_idx, split='train'):
         
         x_img, x_text, edge_index, edge_attr = process_batch(batch, split=split)
         
         # Forward pass to get all embeddings
-        embeddings = self.forward(x_img, x_text, edge_index, edge_attr)
+        embeddings, edge_index = self.forward(x_img, x_text, edge_index, edge_attr)
 
         img_emb = F.normalize(embeddings[edge_index[0, :]], dim=1)
         txt_emb = F.normalize(embeddings[edge_index[1, :]], dim=1)

@@ -23,7 +23,7 @@ def get_clip_embedder(itm, preprocess, tokenizer, base_folder='../wikidata_arthi
                 image = preprocess(img).unsqueeze(0)
             except Exception as e:
                 print(f"Error loading image {os.path.join(base_folder, itm)}: {e}")
-                image = torch.zeros((1, 3, 224, 224))  # placeholder or skip
+                image = torch.zeros((3, 224, 224))  # placeholder or skip
             
             if not torch.isfinite(image).all():
                 print("⚠️ Non-finite values in image", itm)

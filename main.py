@@ -30,13 +30,13 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     
  
     # Training data
-    train_data_list = load_json_data(train_path)#[-5000:]
+    train_data_list = load_json_data(train_path)[:5000]
     train_graph_data, train_node_to_id, train_edge_labels = build_graph_from_json(train_data_list, preprocess, tokenizer, base_folder=base_folder)
     train_graph_data = train_graph_data.to(device)
     print("Loaded training data with {} nodes.".format(len(train_node_to_id.keys())))
     
     # Validation data
-    val_data_list = load_json_data(val_path)#[:1000]
+    val_data_list = load_json_data(val_path)[:1000]
     val_graph_data, val_node_to_id, val_edge_labels = build_graph_from_json(val_data_list, preprocess, tokenizer, base_folder=base_folder)
     val_graph_data = val_graph_data.to(device)
     print("Loaded val data with {} nodes.".format(len(val_node_to_id.keys())))
@@ -63,7 +63,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
         device='cuda' if torch.cuda.is_available() else 'mps'
     )
     
-    
+    print(model)
     print("Creating data loaders...")
     train_dataset = GraphEdgeDataset(train_graph_data)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -78,14 +78,15 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
         accelerator='gpu' if torch.cuda.is_available() else 'mps',
         devices=1, # Use 1 GPU if available
         callbacks=[
-            EarlyStopping(monitor='val_loss', patience=5),
+            EarlyStopping(monitor='val_loss', patience=15),
             ModelCheckpoint(
                 monitor='val_loss',
                 dirpath='checkpoints',
                 filename='sheaf-gnn-{epoch:02d}-{val_loss:.2f}',
                 save_top_k=3
             )
-        ]
+        ],
+        gradient_clip_val=1.0, gradient_clip_algorithm="norm"
     )
     
     # Train the model
@@ -99,12 +100,12 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
         plot_subgraph(train_graph_data.cpu(), train_node_to_id, 
                      raw_edge_labels=train_edge_labels, 
                      num_nodes=12,
-                     save_path="train_graph.png")
+                     save_path="figures/train_graph.png")
         
         plot_subgraph(val_graph_data.cpu(), val_node_to_id, 
                      raw_edge_labels=val_edge_labels, 
                      num_nodes=12,
-                     save_path="val_graph.png")
+                     save_path="figures/val_graph.png")
         
         # plot_subgraph(test_graph_data.cpu(), test_node_to_id, 
         #              raw_edge_labels=test_edge_labels, 
