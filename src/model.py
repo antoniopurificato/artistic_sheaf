@@ -132,7 +132,7 @@ class SheafConvLayer(nn.Module):
         Returns:
             Tensor: Updated node features [num_nodes, latent_dim]
         """
-        device_2 = 'gpu' if torch.cuda.is_available() else 'cpu'
+        device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
         if x.dim() == 3 and x.size(0) == 1:
             x = x.squeeze(0) 
         
@@ -148,7 +148,6 @@ class SheafConvLayer(nn.Module):
         assert not torch.isnan(laplacian.values()).any(), "NaNs in laplacian"
 
         return x, maps
-   
     
 class SheafMultimodalGNN(pl.LightningModule):
     def __init__(
@@ -217,21 +216,7 @@ class SheafMultimodalGNN(pl.LightningModule):
 
         t = torch.cat([t_img, t_text], dim=0).view(-1, self.latent_dim)
         edge_index[1, :] += t_img.size(0)  # Shift text node indices
-        # t = torch.empty((edge_index.max().item() + 1, self.latent_dim), device=self._device)
-        
-        # # print(edge_index.min(), edge_index.max())
-        # x_img_idx = edge_index[0, :]
-        # x_text_idx = edge_index[1, :]
-        
-        # #assert len(torch.unique(x_img_idx)) == len(x_img_idx), "Duplicate image idx"
-        # # assert len(torch.unique(x_text_idx)) == len(x_text_idx), "Duplicate text idx"
-
-        # # Place A and B in their correct positions
-        # t[x_img_idx] = t_img
-        # t[x_text_idx] = t_text
-
         self.num_nodes = t.size(0)
-        #print('number of nodes', self.num_nodes)
         
         if not (t != 0).any(dim=1).all():
             print("Warning: Some rows in t are all zeros — embeddings not assigned?")

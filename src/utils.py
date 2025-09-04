@@ -67,11 +67,11 @@ def log_verbose(model, loss_clip, loss_edge, layer_prefixes=None):
 
                   
 class GraphEdgeDataset(torch.utils.data.Dataset):
-    def __init__(self, graph_data: Data):
+    def __init__(self, graph_data: Data, device):
         self.edge_indices = graph_data.edge_index.t()
         self.edge_attrs = graph_data.edge_attr
         self.x = graph_data.x
-        self.device = 'cuda' if torch.cuda.is_available() else 'mps'
+        self.device = device
         
     def __len__(self):
         return len(self.edge_indices)

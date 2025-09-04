@@ -16,7 +16,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     Main function modified to use SheafMultimodalGNN with train/val/test splits.
     """
     # Set device
-    device = 'cuda' if torch.cuda.is_available() else 'mps'
+    device = 'cuda' #'cuda' if torch.cuda.is_available() else 'mps'
     print(f"Using device: {device}")
     seed_everything(seed=seed)
     
@@ -60,14 +60,14 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
         num_layers=3,
         step_size=1.0,
         lr=1e-4,
-        device='cuda' if torch.cuda.is_available() else 'mps'
+        device=device
     )
     
     print(model)
     print("Creating data loaders...")
-    train_dataset = GraphEdgeDataset(train_graph_data)
+    train_dataset = GraphEdgeDataset(train_graph_data, device)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_dataset = GraphEdgeDataset(val_graph_data)
+    val_dataset = GraphEdgeDataset(val_graph_data, device)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     # test_dataset = GraphEdgeDataset(test_graph_data)
     # test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
@@ -75,7 +75,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     # Configure the trainer with GPU acceleration
     trainer = pl.Trainer(
         max_epochs=50,
-        accelerator='gpu' if torch.cuda.is_available() else 'mps',
+        accelerator=device,
         devices=1, # Use 1 GPU if available
         callbacks=[
             EarlyStopping(monitor='val_loss', patience=15),
@@ -114,4 +114,4 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
 
 
 if __name__ == "__main__":
-    main('data', plot_graph=True, batch_size=256, seed=42, base_folder='../SemArt/')
+    main('data', plot_graph=True, batch_size=256, seed=42, base_folder='data/SemArt/')
