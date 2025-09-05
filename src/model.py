@@ -6,7 +6,7 @@ import open_clip
 from typing import Union, Tuple
 from src.metrics import *
 from src.losses import clip_loss
-from src.utils import process_batch
+from src.utils import *
 
 class SheafConvLayer(nn.Module):
     def __init__(self, latent_dim, edge_attr_dim, step_size=1.0, device='cpu'):
@@ -96,21 +96,22 @@ class SheafConvLayer(nn.Module):
         maps = maps.to(device_2)
         left_maps = maps[self.left_idx.to(device_2)]
         right_maps = maps[self.right_idx.to(device_2)]
-        
+
         # Off-diagonal entries are negative product of opposite maps
         non_diag = -left_maps * right_maps  # [num_edges, 1]
-        
+
         # Diagonal entries are sum of squared maps
         diag = torch.zeros(self.num_nodes, device=device_2)
-        diag.index_add_(0, row, (maps.squeeze() ** 2))  # Accumulate per node
-        
+        squared_maps = maps.squeeze() ** 2
+        diag.index_add_(0, row, squared_maps)
+
         # Normalize Laplacian
         d_sqrt_inv = (diag + 1).pow(-0.5)  # add 1 for numerical stability
         left_norm = d_sqrt_inv[row]
         right_norm = d_sqrt_inv[col]
         norm_maps = left_norm * non_diag.squeeze() * right_norm
         diag_norm = d_sqrt_inv * diag * d_sqrt_inv
-        
+
         # Construct sparse matrix indices and values
         diag_idx = torch.arange(self.num_nodes, device=device_2)
         indices = torch.cat([
@@ -119,8 +120,12 @@ class SheafConvLayer(nn.Module):
         ], dim=1)
         values = torch.cat([diag_norm, norm_maps])
         laplacian = torch.sparse_coo_tensor(indices, values, (self.num_nodes, self.num_nodes))
+
+        print(f"  Laplacian values norm: {values.norm().item():.4f}")
+
         return laplacian.coalesce()
-    
+
+
     def forward(self, x, edge_attr):
         """
         Forward pass through the sheaf convolution layer.
@@ -136,8 +141,6 @@ class SheafConvLayer(nn.Module):
         if x.dim() == 3 and x.size(0) == 1:
             x = x.squeeze(0) 
         
-        # self.num_nodes = max(self.edge_index.max().item() + 1, x.size(0))
-
         maps = self.predict_restriction_maps(x, edge_attr)
         laplacian = self.build_laplacian(maps)
         y = self.linear(x)
@@ -176,8 +179,8 @@ class SheafMultimodalGNN(pl.LightningModule):
         for param in self.clip_model.parameters():
             param.requires_grad = False
         
-        #self.clip_model.visual.proj.requires_grad = True
-        #self.clip_model.text_projection.requires_grad = True
+        self.clip_model.visual.proj.requires_grad = True
+        self.clip_model.text_projection.requires_grad = True
         
         self.input_proj = nn.Linear(self.latent_dim, latent_dim)
         self.output_proj = nn.Linear(latent_dim, latent_dim)
@@ -220,15 +223,10 @@ class SheafMultimodalGNN(pl.LightningModule):
         
         if not (t != 0).any(dim=1).all():
             print("Warning: Some rows in t are all zeros — embeddings not assigned?")
-            # show which rows are all zeros and whether they appear in x_img_idx or x_text_idx
             zero_rows = (t == 0).all(dim=1)
             print("Zero rows:", zero_rows.nonzero(as_tuple=True)[0])
-            # print("Image indices:", x_img_idx)
-            # print("Text indices:", x_text_idx)
-
-        # assert (x_img_idx >= 0).all() and (x_img_idx < t.size(0)).all(), "Invalid image index"
-        # assert (x_text_idx >= 0).all() and (x_text_idx < t.size(0)).all(), "Invalid text index"
-
+        
+        
         assert not torch.isnan(t).any(), "NaNs before input_proj"
         t = self.input_proj(t)
         assert not torch.isnan(t).any(), "NaNs after input_proj"
@@ -255,7 +253,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         txt_emb = F.normalize(embeddings[edge_index[1, :]], dim=1)
 
         sim_matrix = img_emb @ txt_emb.T
-        print("Similarity matrix (val):", sim_matrix[:10, :10])
+        print("Similarity matrix (val):", sim_matrix[:5, :5])
 
         loss = clip_loss(img_emb, txt_emb)
         
@@ -295,11 +293,19 @@ class SheafMultimodalGNN(pl.LightningModule):
         """
         train_loss, metrics_i2t, metrics_t2i = self.step(batch, batch_idx, split='train')
         
-        # # Debug: check gradients
-        # for name, param in self.named_parameters():
-        #     if param.requires_grad and param.grad is not None:
-        #         self.log(f'grad_norm/{name}', param.grad.norm(), on_step=True, prog_bar=False)
-
+        log_verbose(
+            self,
+            train_loss,           # your main CLIP loss tensor
+            0,           # your edge BCE tensor
+            layer_prefixes={
+                "clip_proj": ["clip_model.visual.proj", "clip_model.text_projection"],
+                "input_proj": ["input_proj"],
+                "output_proj": ["output_proj"],
+                "conv0": ["convs.0.map_head", "convs.0.linear"],
+                "conv1": ["convs.1.map_head", "convs.1.linear"],
+                "conv2": ["convs.2.map_head", "convs.2.linear"],
+            }
+        )
 
         return {'loss': train_loss, **{f'train_i2t_{k}': v for k, v in metrics_i2t.items()} , **{f'train_t2i_{k}': v for k, v in metrics_t2i.items()}}
 

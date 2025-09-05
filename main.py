@@ -16,7 +16,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     Main function modified to use SheafMultimodalGNN with train/val/test splits.
     """
     # Set device
-    device = 'cuda' #'cuda' if torch.cuda.is_available() else 'mps'
+    device = 'cuda' if torch.cuda.is_available() else 'mps'
     print(f"Using device: {device}")
     seed_everything(seed=seed)
     
@@ -28,7 +28,6 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     tokenizer = open_clip.get_tokenizer('ViT-B-32')
     _,_, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     
- 
     # Training data
     train_data_list = load_json_data(train_path)[:5000]
     train_graph_data, train_node_to_id, train_edge_labels = build_graph_from_json(train_data_list, preprocess, tokenizer, base_folder=base_folder)
@@ -114,4 +113,4 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
 
 
 if __name__ == "__main__":
-    main('data', plot_graph=True, batch_size=256, seed=42, base_folder='data/SemArt/')
+    main('data', plot_graph=True, batch_size=256, seed=42, base_folder='../SemArt/')

@@ -91,12 +91,19 @@ class GraphEdgeDataset(torch.utils.data.Dataset):
         batch_text = torch.stack([x for x in batch_x if isinstance(x, torch.Tensor) and x.dim() == 1], dim=0).squeeze(0).to(torch.long).to(self.device)  # Add batch dimension
 
         return batch_img, batch_text, edge, edge_attr
+
     
 def process_batch(batch, split='train'):
     x_img, x_text, edge_index, edge_attr = batch
     edge_index = edge_index.t()
     
     if split == 'test':
+        _, image_ivs = torch.unique(edge_index[0, :], sorted=False, return_inverse=True)
+        _, text_ivs = torch.unique(edge_index[1, :], sorted=False, return_inverse=True)
+        edge_index = torch.stack([image_ivs, text_ivs], dim=0)
+        x_img = x_img[edge_index[0, :]]
+        x_text = x_text[edge_index[1, :]]
+
         return x_img, x_text, edge_index, edge_attr
     
     device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -131,3 +138,55 @@ def process_batch(batch, split='train'):
         x_text = x_text[rand_indices, :]
     
     return x_img, x_text, edge_index, edge_attr
+
+
+def sample_edges_with_negatives_cf_guidance(
+    pos_ei: torch.Tensor,
+    edge_attr: torch.Tensor,
+    num_nodes: int,
+    num_neg: int,
+    device: torch.device,
+    max_tries: int = 10000
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Sample negatives avoiding collisions with positives, and create edge_attr with CF guidance (dropout fill).
+    """
+    s_pos, t_pos = pos_ei
+    
+    pos_set = set((int(i), int(j)) for i, j in zip(s_pos, t_pos))
+    s_neg, t_neg, ea_neg = [], [], []
+    tries = 0
+
+    while len(s_neg) < num_neg and tries < max_tries:
+        tries += 1
+        si = torch.randint(0, num_nodes, (1,), device=device)
+        ti = torch.randint(0, num_nodes, (1,), device=device)
+        ea = torch.randint(0, len(s_pos), (1,), device=device) # or all the same for negatives
+
+        if si != ti and (int(si), int(ti)) not in pos_set:
+            s_neg.append(si)
+            t_neg.append(ti)
+            ea_neg.append(edge_attr[ea])
+
+    if len(s_neg) < num_neg:
+        print(f"[WARN] Only sampled {len(s_neg)} negatives (wanted {num_neg})")
+
+    s_neg = torch.cat(s_neg, dim=0)
+    t_neg = torch.cat(t_neg, dim=0)
+    ea_neg = torch.cat(ea_neg, dim=0)
+    
+    s_all = torch.cat([s_pos, s_neg], dim=0)
+    t_all = torch.cat([t_pos, t_neg], dim=0)
+    edge_index = torch.stack([s_all, t_all], dim=0)
+
+    # edge_attr: fill for negatives
+    edge_attr_all = torch.cat([edge_attr, ea_neg], dim=0)
+    
+    # classifier-free guidance dropout: randomly drop attr for some positives too
+    drop_mask = torch.rand(len(edge_attr_all), device=device) < 0.1  # e.g. 10% drop
+    edge_attr_all[drop_mask] = 0.0
+
+    return edge_index, edge_attr_all, torch.cat([
+        torch.ones(len(s_pos), device=device),
+        torch.zeros(len(s_neg), device=device)
+    ], dim=0)  # labels
