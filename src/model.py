@@ -8,8 +8,102 @@ from src.metrics import *
 from src.losses import clip_loss
 from src.utils import *
 
+class MultiheadEdgeAttention(nn.Module):
+    """
+    Bipartite multi-head attention that produces:
+      - logits_ij:  [N_img, N_txt] (images as queries, texts as keys)
+      - logits_ji:  [N_txt, N_img] (texts as queries, images as keys)
+
+    An optional edge attribute bias is added *only* at known positive edges (teacher edges).
+    """
+    def __init__(self, latent_dim: int, edge_attr_dim: int, num_heads: int = 4, head_dim: int = 64, bias_from_edges: bool = True):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.embed_dim = num_heads * head_dim
+        self.scale = head_dim ** 0.5
+        self.bias_from_edges = bias_from_edges
+
+        # Projections
+        self.q_img = nn.Linear(latent_dim + edge_attr_dim, self.embed_dim)
+        self.k_txt = nn.Linear(latent_dim + edge_attr_dim, self.embed_dim)
+
+        self.q_txt = nn.Linear(latent_dim + edge_attr_dim, self.embed_dim)
+        self.k_img = nn.Linear(latent_dim + edge_attr_dim, self.embed_dim)
+
+        
+    @staticmethod
+    def _to_heads(x: torch.Tensor, H: int, D: int) -> torch.Tensor:
+        # x: [N, H*D] -> [N, H, D]
+        return x.view(x.size(0), H, D)
+    
+    # in MultiheadEdgeAttention
+    def infer_logits(self, x_img: torch.Tensor, x_txt: torch.Tensor, 
+                     edge_attr: Optional[torch.Tensor] = None) -> dict:
+        """
+        Compute dense logits without any edge bias (no edge_index, no edge_attr).
+        Returns:
+        - logits_ij: [N_img, N_txt]
+        - logits_ji: [N_txt, N_img]
+        """
+        H, D = self.num_heads, self.head_dim
+        x_img = torch.cat([x_img, edge_attr], dim=-1)
+        x_txt = torch.cat([x_txt, edge_attr], dim=-1)
+
+        q_i = self._to_heads(self.q_img(x_img), H, D)   # [N_img, H, D]
+        k_j = self._to_heads(self.k_txt(x_txt), H, D)   # [N_txt, H, D]
+        q_j = self._to_heads(self.q_txt(x_txt), H, D)   # [N_txt, H, D]
+        k_i = self._to_heads(self.k_img(x_img), H, D)   # [N_img, H, D]
+
+        dots_ij = torch.einsum('ihd,jhd->hij', q_i, k_j) / self.scale
+        logits_ij = dots_ij.mean(dim=0)  # [N_img, N_txt]
+
+        dots_ji = torch.einsum('jhd,ihd->hji', q_j, k_i) / self.scale
+        logits_ji = dots_ji.mean(dim=0)  # [N_txt, N_img]
+        
+        return {"logits_ij": logits_ij, "logits_ji": logits_ji}
+
+    def forward(
+        self,
+        x_img: torch.Tensor,  # [N_img, d]
+        x_txt: torch.Tensor,  # [N_txt, d]
+        pos_ei_img_txt: torch.Tensor,  # [2, E_pos] with text indices in [0..N_txt-1], image indices in [0..N_img-1]
+        edge_attr_pos: Optional[torch.Tensor] = None,  # [E_pos, Fe] for positives only
+        split: str = "train"
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Returns a dict with:
+          - logits_ij: [N_img, N_txt]
+          - logits_ji: [N_txt, N_img]
+          - m_ij_pos:  [E_pos] (tanh of logits_ij at positive edges)
+          - m_ji_pos:  [E_pos] (tanh of logits_ji at positive edges, reversed)
+        """
+        # splitting edge attribute for images and texts (as if the edge was split)
+        aggs = self.infer_logits(x_img, x_txt, edge_attr=edge_attr_pos)
+        
+        logits_ij = aggs["logits_ij"]  # [N_img, N_txt]
+        logits_ji = aggs["logits_ji"]  # [N_txt, N_img]
+        
+        # updating edge index based on prediction
+        pos_ei_img_txt_new = logits_ij.argmax(dim=0)  # [N_img]
+        pos_ei_img_txt_new = torch.stack([torch.arange(len(pos_ei_img_txt_new)).to(pos_ei_img_txt.device),
+                                      pos_ei_img_txt_new + len(x_img)], dim=0)  # [2, E_pos]
+        
+        print('number of correctly predicted edges:', (pos_ei_img_txt_new[1] == pos_ei_img_txt[1]).sum().item(), 'out of', pos_ei_img_txt.size(1))
+
+        if split != "train":
+            pos_ei_img_txt = pos_ei_img_txt_new
+            
+        return {
+            "logits_ij": logits_ij,
+            "logits_ji": logits_ji,
+            "edge_index": pos_ei_img_txt
+        }
+
+
 class SheafConvLayer(nn.Module):
-    def __init__(self, latent_dim, edge_attr_dim, step_size=1.0, device='cpu'):
+    def __init__(self, latent_dim, edge_attr_dim, step_size=1.0, device='cpu', num_heads=4, head_dim=64):
+        
         super().__init__()
         self.device = device
         self.step_size = step_size
@@ -22,17 +116,18 @@ class SheafConvLayer(nn.Module):
             nn.Tanh()
         ).to(device)
 
+        self.attn = MultiheadEdgeAttention(latent_dim, edge_attr_dim, num_heads=num_heads, head_dim=head_dim)
+        
         self.linear = nn.Linear(latent_dim, latent_dim).to(device)
         self.edge_index = None
         self.left_idx = None
         self.right_idx = None
         self.num_nodes = None
 
-
     def set_graph(self, edge_index: torch.Tensor, num_nodes: int):
         self.edge_index = edge_index.to(self.device)
         self.num_nodes = num_nodes
-        self.left_idx, self.right_idx = self.compute_left_right_map_index()
+        # self.left_idx, self.right_idx = self.compute_left_right_map_index()
 
     def compute_left_right_map_index(self) -> tuple:
         """
@@ -58,10 +153,10 @@ class SheafConvLayer(nn.Module):
         return (torch.tensor(left_index), 
                 torch.tensor(right_index))
         
-    
     def predict_restriction_maps(
         self, 
-        x: torch.Tensor, 
+        x_row: torch.Tensor,
+        x_col: torch.Tensor,
         edge_attr: torch.Tensor
     ) -> torch.Tensor:
         """
@@ -74,9 +169,6 @@ class SheafConvLayer(nn.Module):
         Returns:
             torch.Tensor: Map values [num_edges, 1].
         """
-        row, col = self.edge_index
-        x_row = x[row]  # Source node features
-        x_col = x[col]  # Target node features
         edge_inputs = torch.cat([x_row.to(self.device), x_col.to(self.device), edge_attr.to(self.device)], dim=1)
         maps = self.sheaf_learner(edge_inputs)  # Output a scalar map per edge
         return maps
@@ -125,8 +217,25 @@ class SheafConvLayer(nn.Module):
 
         return laplacian.coalesce()
 
+    def compute_attention_loss(self, logits_ij: torch.Tensor, logits_ji: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """
+        Computes a loss to encourage symmetry in attention logits.
 
-    def forward(self, x, edge_attr):
+        Args:
+            logits_ij (torch.Tensor): Logits from images to texts [N_img, N_txt].
+            logits_ji (torch.Tensor): Logits from texts to images [N_txt, N_img].
+
+        Returns:
+            torch.Tensor: Symmetry loss scalar.
+        """
+        
+        loss_i2t = torch.nn.functional.cross_entropy(logits_ij, labels)
+        loss_t2i = torch.nn.functional.cross_entropy(logits_ji, labels.t())
+        edge_loss = 0.5 * (loss_i2t + loss_t2i) 
+        
+        return edge_loss
+
+    def forward(self, x_img, x_txt, edge_attr, split='train') -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass through the sheaf convolution layer.
 
@@ -138,19 +247,32 @@ class SheafConvLayer(nn.Module):
             Tensor: Updated node features [num_nodes, latent_dim]
         """
         device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
-        if x.dim() == 3 and x.size(0) == 1:
-            x = x.squeeze(0) 
         
-        maps = self.predict_restriction_maps(x, edge_attr)
+        labels = torch.zeros((len(x_img), len(x_txt)), device=x_txt.device)
+        labels[self.edge_index[0], self.edge_index[1]] = 1.0
+        # print if labels is diagonal matrix
+        print("Labels (edge presence) matrix (train):", (labels == torch.eye(len(x_img), device=x_txt.device)).sum().item(), "out of", labels.numel())
+        
+        print(x_img.shape, x_txt.shape, edge_attr.shape, self.edge_index.shape)
+        attn_out = self.attn(x_img, x_txt, self.edge_index, edge_attr, split=split)
+        self.edge_index = attn_out["edge_index"]
+        self.left_idx, self.right_idx = self.compute_left_right_map_index()
+        
+        maps = self.predict_restriction_maps(x_img, x_txt, edge_attr)
         laplacian = self.build_laplacian(maps)
+        x = torch.cat([x_img, x_txt], dim=0)
         y = self.linear(x)
         x = x - self.step_size * torch.sparse.mm(laplacian, y.to(device_2)).to(y.device)
+        
+        logits_ij = attn_out["logits_ij"]  # [N_img, N_txt]
+        logits_ji = attn_out["logits_ji"]  # [N_txt, N_img]
+        edge_loss = self.compute_attention_loss(logits_ij, logits_ji, labels)
         
         assert not torch.isnan(x).any(), "NaNs in input to conv"
         assert not torch.isnan(maps).any(), "NaNs in maps"
         assert not torch.isnan(laplacian.values()).any(), "NaNs in laplacian"
 
-        return x, maps
+        return x, edge_loss
     
 class SheafMultimodalGNN(pl.LightningModule):
     def __init__(
@@ -160,7 +282,9 @@ class SheafMultimodalGNN(pl.LightningModule):
         num_layers: int = 3,
         step_size: float = 1.0,
         lr: float = 1e-3,
-        device: str = 'cpu'
+        device: str = 'cpu',
+        w_clip: float = 1.0,
+        w_edge_bce: float = 1.0
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -172,6 +296,8 @@ class SheafMultimodalGNN(pl.LightningModule):
 
         self.num_nodes = None
         
+        self.w_clip = w_clip
+        self.w_edge_bce = w_edge_bce
 
         self.clip_model, _, _ = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
         self.clip_model = self.clip_model.to(self._device)
@@ -196,7 +322,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         ])
 
 
-    def forward(self, x_img, x_text, edge_index, edge_attr):
+    def forward(self, x_img, x_text, edge_index, edge_attr, split='train') -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Forward pass through the full GNN.
 
@@ -206,59 +332,59 @@ class SheafMultimodalGNN(pl.LightningModule):
         Returns:
             Tensor: Final node embeddings [num_nodes, latent_dim]
         """
-        
-        edge_attr = self.clip_model.encode_text(edge_attr) 
+        with torch.no_grad():
+            edge_attr = self.clip_model.encode_text(edge_attr) 
+
         t_img = self.clip_model.encode_image(x_img)  # Encode image features
         t_text = self.clip_model.encode_text(x_text)  # Encode text features
-
+        self.num_nodes = t_img.size(0) + t_text.size(0)
         if torch.isnan(t_img).any():
             print(x_img.min(), x_img.max())
             
         assert not torch.isnan(t_img).any(), "NaNs in CLIP image encoder"
         assert not torch.isnan(t_text).any(), "NaNs in CLIP text encoder"
-
-        t = torch.cat([t_img, t_text], dim=0).view(-1, self.latent_dim)
-        edge_index[1, :] += t_img.size(0)  # Shift text node indices
-        self.num_nodes = t.size(0)
         
-        if not (t != 0).any(dim=1).all():
-            print("Warning: Some rows in t are all zeros — embeddings not assigned?")
-            zero_rows = (t == 0).all(dim=1)
-            print("Zero rows:", zero_rows.nonzero(as_tuple=True)[0])
-        
-        
-        assert not torch.isnan(t).any(), "NaNs before input_proj"
-        t = self.input_proj(t)
-        assert not torch.isnan(t).any(), "NaNs after input_proj"
+        t_img = self.input_proj(t_img)
+        t_txt = self.input_proj(t_text)
+        assert not torch.isnan(t_img).any(), "NaNs after input_proj"
+        assert not torch.isnan(t_text).any(), "NaNs after input_proj"
 
         h_list = []
+        edge_losses = []
         for i, conv in enumerate(self.convs):
             conv.set_graph(edge_index, self.num_nodes)
-            h, _ = conv(t, edge_attr)
+            h, edge_loss = conv(t_img, t_txt, edge_attr, split=split)
             h_list.append(h)
+            edge_losses.append(edge_loss)
 
+        edge_loss = torch.stack(edge_losses).mean()
         out = torch.stack(h_list, dim=0).mean(dim=0)
         out = self.output_proj(out)
         
-        return out, edge_index
+        return out, edge_index, edge_loss
     
     def step(self, batch, batch_idx, split='train'):
         
-        x_img, x_text, edge_index, edge_attr = process_batch(batch, split=split)
-        
+        x_img, x_text, edge_index, edge_attr = process_batch(batch, split=split) # for some reason edge_idx[0] != edge_idx[1] 
+        print(edge_index.shape, 'adter process')
         # Forward pass to get all embeddings
-        embeddings, edge_index = self.forward(x_img, x_text, edge_index, edge_attr)
+        embeddings, edge_index, edge_loss = self.forward(x_img, x_text, edge_index, edge_attr, split=split)
 
-        img_emb = F.normalize(embeddings[edge_index[0, :]], dim=1)
-        txt_emb = F.normalize(embeddings[edge_index[1, :]], dim=1)
+        img_emb = F.normalize(embeddings[: x_img.size(0), :], dim=1)
+        txt_emb = F.normalize(embeddings[x_img.size(0):, :], dim=1)
 
         sim_matrix = img_emb @ txt_emb.T
         print("Similarity matrix (val):", sim_matrix[:5, :5])
 
-        loss = clip_loss(img_emb, txt_emb)
+        loss_clip = clip_loss(img_emb, txt_emb)
         
+        loss = self.w_clip * loss_clip + self.w_edge_bce * edge_loss
+
         metrics_i2t = compute_clip_metrics(img_emb, txt_emb)
         metrics_t2i = compute_clip_metrics(txt_emb, img_emb)
+        self.log(f'{split}_loss_clip', loss_clip, prog_bar=True, on_epoch=True, on_step=False,)
+        self.log(f'{split}_loss_edge', edge_loss, prog_bar=True, on_epoch=True, on_step=False,)
+
         self.log(f'{split}_loss', loss, prog_bar=True, on_epoch=True, on_step=False,)
         for name, value in metrics_i2t.items():
             self.log(f'{split}_i2t_{name}', value, prog_bar=True, on_epoch=True, on_step=False,)
@@ -278,7 +404,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         #         for metric_name, value in value.items():
         #             self.log(f'{split}_{relation}_{metric_name}', value, prog_bar=True, on_epoch=True, on_step=False,)
             
-        return loss, metrics_i2t, metrics_t2i
+        return loss, metrics_i2t, metrics_t2i, loss_clip, edge_loss
 
     def training_step(self, batch: tuple, batch_idx: int) -> torch.Tensor:
         """
@@ -291,19 +417,19 @@ class SheafMultimodalGNN(pl.LightningModule):
         Returns:
             torch.Tensor: Total loss
         """
-        train_loss, metrics_i2t, metrics_t2i = self.step(batch, batch_idx, split='train')
+        train_loss, metrics_i2t, metrics_t2i, loss_clip, loss_edge = self.step(batch, batch_idx, split='train')
         
         log_verbose(
             self,
-            train_loss,           # your main CLIP loss tensor
-            0,           # your edge BCE tensor
+            loss_clip,           # your main CLIP loss tensor
+            loss_edge,           # your edge BCE tensor
             layer_prefixes={
                 "clip_proj": ["clip_model.visual.proj", "clip_model.text_projection"],
                 "input_proj": ["input_proj"],
-                "output_proj": ["output_proj"],
                 "conv0": ["convs.0.map_head", "convs.0.linear"],
                 "conv1": ["convs.1.map_head", "convs.1.linear"],
                 "conv2": ["convs.2.map_head", "convs.2.linear"],
+                "attn": ["convs.0.attn", "convs.1.attn", "convs.2.attn"],
             }
         )
 
@@ -320,7 +446,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         Returns:
             dict: Dictionary containing validation metrics
         """
-        val_loss, metrics_i2t, metrics_t2i = self.step(batch, batch_idx, split='val')
+        val_loss, metrics_i2t, metrics_t2i, _, _ = self.step(batch, batch_idx, split='val')
         return {'val_loss': val_loss, **{f'val_i2t_{k}': v for k, v in metrics_i2t.items()} , **{f'val_t2i_{k}': v for k, v in metrics_t2i.items()}}
 
     def test_step(self, batch: tuple, batch_idx: int) -> dict:
@@ -334,10 +460,9 @@ class SheafMultimodalGNN(pl.LightningModule):
         Returns:
             dict: Dictionary containing test metrics
         """
-        _, metrics_i2t, metrics_t2i = self.step(batch, batch_idx, split='test')
+        _, metrics_i2t, metrics_t2i, _, _ = self.step(batch, batch_idx, split='test')
         return {**{f'test_i2t_{k}': v for k, v in metrics_i2t.items()},
                 **{f'test_t2i_{k}': v for k, v in metrics_t2i.items()}}
-
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
         """

@@ -25,6 +25,7 @@ def clip_loss(src_emb, tgt_emb, logit_scale=None):
     # Normalize again, in case not already
     src_emb = F.normalize(src_emb, dim=1)
     tgt_emb = F.normalize(tgt_emb, dim=1)
+  
     assert not torch.isnan(src_emb).any(), "NaN in src_emb"
     assert not torch.isnan(tgt_emb).any(), "NaN in tgt_emb"
     

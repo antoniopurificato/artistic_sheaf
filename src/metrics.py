@@ -79,6 +79,7 @@ def compute_clip_metrics(src_emb, tgt_emb, topk=(1, 5, 10)):
 
     return metrics
 
+
 def get_top_k_recommendations(sim_matrix: torch.Tensor, k: int):
     """
     Returns the most recommended items for each query, sorted by similarity.
@@ -91,13 +92,14 @@ def get_top_k_recommendations(sim_matrix: torch.Tensor, k: int):
         List[List[int]]: A list containing the indices of the recommended items for each query
     """
     # Find the indices of the top-k items for each query by sorting the similarity matrix
+    print(sim_matrix.shape)
     _, top_k_indices = torch.topk(sim_matrix, k=k, dim=1)
 
     # Convert the indices to a list of lists
     recommended_items = top_k_indices.tolist()
+    print(len(recommended_items))
 
     return recommended_items
-
 
 
 def compute_precision_at_k(sim_matrix: torch.Tensor, 
@@ -242,6 +244,7 @@ def compute_retrieval_metrics(sim_matrix: torch.Tensor, adj_matrix: torch.Tensor
         metrics[f'ndcg@{k}'] = ndcg
     
     return metrics
+
 
 def compute_bidirectional_metrics(
                                 sim_matrix: torch.Tensor, 
