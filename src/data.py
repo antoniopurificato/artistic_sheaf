@@ -13,6 +13,7 @@ import open_clip
 from PIL import Image
 from tqdm import tqdm
 
+
 def get_clip_embedder(itm, preprocess, tokenizer, base_folder='../wikidata_arthist/'):
     
     with torch.no_grad():

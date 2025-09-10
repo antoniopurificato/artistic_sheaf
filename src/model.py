@@ -47,6 +47,7 @@ class MultiheadEdgeAttention(nn.Module):
         - logits_ji: [N_txt, N_img]
         """
         H, D = self.num_heads, self.head_dim
+        
         x_img = torch.cat([x_img, edge_attr], dim=-1)
         x_txt = torch.cat([x_txt, edge_attr], dim=-1)
 
@@ -84,20 +85,10 @@ class MultiheadEdgeAttention(nn.Module):
         logits_ij = aggs["logits_ij"]  # [N_img, N_txt]
         logits_ji = aggs["logits_ji"]  # [N_txt, N_img]
         
-        # updating edge index based on prediction
-        pos_ei_img_txt_new = logits_ij.argmax(dim=0)  # [N_img]
-        pos_ei_img_txt_new = torch.stack([torch.arange(len(pos_ei_img_txt_new)).to(pos_ei_img_txt.device),
-                                      pos_ei_img_txt_new + len(x_img)], dim=0)  # [2, E_pos]
-        
-        print('number of correctly predicted edges:', (pos_ei_img_txt_new[1] == pos_ei_img_txt[1]).sum().item(), 'out of', pos_ei_img_txt.size(1))
 
-        if split != "train":
-            pos_ei_img_txt = pos_ei_img_txt_new
-            
         return {
             "logits_ij": logits_ij,
             "logits_ji": logits_ji,
-            "edge_index": pos_ei_img_txt
         }
 
 
@@ -188,6 +179,9 @@ class SheafConvLayer(nn.Module):
         maps = maps.to(device_2)
         left_maps = maps[self.left_idx.to(device_2)]
         right_maps = maps[self.right_idx.to(device_2)]
+        
+        # for i, (r, c, w) in enumerate(zip(row.tolist(), col.tolist(), maps.squeeze().tolist())):
+        #     print(f"Arco {i}: {r} -> {c}, peso={w:.4f}")
 
         # Off-diagonal entries are negative product of opposite maps
         non_diag = -left_maps * right_maps  # [num_edges, 1]
@@ -248,24 +242,36 @@ class SheafConvLayer(nn.Module):
         """
         device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
         
-        labels = torch.zeros((len(x_img), len(x_txt)), device=x_txt.device)
-        labels[self.edge_index[0], self.edge_index[1]] = 1.0
-        # print if labels is diagonal matrix
-        print("Labels (edge presence) matrix (train):", (labels == torch.eye(len(x_img), device=x_txt.device)).sum().item(), "out of", labels.numel())
+        # expanding to duplicated vals
+        x_img_ext = x_img[self.edge_index[0]]
+        x_txt_ext = x_txt[self.edge_index[1]]
         
-        print(x_img.shape, x_txt.shape, edge_attr.shape, self.edge_index.shape)
-        attn_out = self.attn(x_img, x_txt, self.edge_index, edge_attr, split=split)
-        self.edge_index = attn_out["edge_index"]
-        self.left_idx, self.right_idx = self.compute_left_right_map_index()
+        labels = torch.eye(len(x_img_ext), len(x_txt_ext), device=x_txt.device)
         
-        maps = self.predict_restriction_maps(x_img, x_txt, edge_attr)
+        attn_out = self.attn(x_img_ext, x_txt_ext, self.edge_index, edge_attr, split=split)
+        logits_ij = attn_out["logits_ij"]  # [N_img, N_txt]
+        logits_ji = attn_out["logits_ji"]  # [N_txt, N_img]
+        
+        
+        new_left_idx = logits_ij.argmax(dim=0)  # [N_img]
+        new_right_idx = logits_ij.argmax(dim=1)  # [N_txt]
+
+        print('number of correctly predicted edges:', (new_left_idx == torch.arange(len(new_left_idx), device=new_left_idx.device)).sum().item(), 'out of', new_left_idx.size(0))
+        print('number of correctly predicted edges:', (new_right_idx == torch.arange(len(new_right_idx), device=new_right_idx.device)).sum().item(), 'out of', new_right_idx.size(0))
+
+        if split != "train":
+            self.left_idx, self.right_idx = new_left_idx, new_right_idx
+        else:
+            self.left_idx, self.right_idx = self.compute_left_right_map_index()
+        
+        maps = self.predict_restriction_maps(x_img_ext, x_txt_ext, edge_attr)
+        self.num_nodes = len(x_img_ext) + len(x_txt_ext)
         laplacian = self.build_laplacian(maps)
-        x = torch.cat([x_img, x_txt], dim=0)
+        
+        x = torch.cat([x_img_ext, x_txt_ext], dim=0)
         y = self.linear(x)
         x = x - self.step_size * torch.sparse.mm(laplacian, y.to(device_2)).to(y.device)
         
-        logits_ij = attn_out["logits_ij"]  # [N_img, N_txt]
-        logits_ji = attn_out["logits_ji"]  # [N_txt, N_img]
         edge_loss = self.compute_attention_loss(logits_ij, logits_ji, labels)
         
         assert not torch.isnan(x).any(), "NaNs in input to conv"
@@ -337,6 +343,7 @@ class SheafMultimodalGNN(pl.LightningModule):
 
         t_img = self.clip_model.encode_image(x_img)  # Encode image features
         t_text = self.clip_model.encode_text(x_text)  # Encode text features
+        
         self.num_nodes = t_img.size(0) + t_text.size(0)
         if torch.isnan(t_img).any():
             print(x_img.min(), x_img.max())
@@ -344,8 +351,9 @@ class SheafMultimodalGNN(pl.LightningModule):
         assert not torch.isnan(t_img).any(), "NaNs in CLIP image encoder"
         assert not torch.isnan(t_text).any(), "NaNs in CLIP text encoder"
         
-        t_img = self.input_proj(t_img)
+        t_img = self.input_proj(t_img) # at some point pass to concatenation immediately
         t_txt = self.input_proj(t_text)
+        
         assert not torch.isnan(t_img).any(), "NaNs after input_proj"
         assert not torch.isnan(t_text).any(), "NaNs after input_proj"
 
@@ -365,13 +373,13 @@ class SheafMultimodalGNN(pl.LightningModule):
     
     def step(self, batch, batch_idx, split='train'):
         
-        x_img, x_text, edge_index, edge_attr = process_batch(batch, split=split) # for some reason edge_idx[0] != edge_idx[1] 
-        print(edge_index.shape, 'adter process')
+        x_img, x_text, edge_index, edge_attr = process_batch(batch, split='sheaf') # for some reason edge_idx[0] != edge_idx[1] 
+        
         # Forward pass to get all embeddings
         embeddings, edge_index, edge_loss = self.forward(x_img, x_text, edge_index, edge_attr, split=split)
 
-        img_emb = F.normalize(embeddings[: x_img.size(0), :], dim=1)
-        txt_emb = F.normalize(embeddings[x_img.size(0):, :], dim=1)
+        img_emb = F.normalize(embeddings[: edge_index.size(1), :], dim=1)
+        txt_emb = F.normalize(embeddings[edge_index.size(1):, :], dim=1)
 
         sim_matrix = img_emb @ txt_emb.T
         print("Similarity matrix (val):", sim_matrix[:5, :5])
