@@ -93,12 +93,14 @@ class MultiheadEdgeAttention(nn.Module):
 
 
 class SheafConvLayer(nn.Module):
-    def __init__(self, latent_dim, edge_attr_dim, step_size=1.0, device='cpu', num_heads=8, head_dim=256):
+    def __init__(self, latent_dim, edge_attr_dim, step_size=1.0, device='cpu',
+                 num_heads=8, head_dim=256, operation='sum'):
         
         super().__init__()
         self.device = device
         self.step_size = step_size
         self.latent_dim = latent_dim
+        self.operation = operation
 
         self.sheaf_learner = nn.Sequential(
             nn.Linear(2 * latent_dim + edge_attr_dim, 64),
@@ -244,6 +246,7 @@ class SheafConvLayer(nn.Module):
         x_txt_ext = x_txt[self.edge_index[1]]
         
         
+        
         labels = torch.eye(len(x_img_ext), len(x_txt_ext), device=x_txt_ext.device)
         
         attn_out = self.attn(x_img_ext, x_txt_ext, self.edge_index, edge_attr, split=split)
@@ -274,7 +277,7 @@ class SheafConvLayer(nn.Module):
         assert not torch.isnan(x).any(), "NaNs in input to conv"
         assert not torch.isnan(maps).any(), "NaNs in maps"
         assert not torch.isnan(out).any(), "NaNs in laplacian"
-        return x, edge_loss
+        return x, edge_loss, maps
     
 class SheafMultimodalGNN(pl.LightningModule):
     def __init__(
@@ -286,7 +289,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         lr: float = 1e-3,
         device: str = 'cpu',
         w_clip: float = 1.0,
-        w_edge_bce: float = 1.0
+        w_edge_bce: float = 0#1.0
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -330,11 +333,7 @@ class SheafMultimodalGNN(pl.LightningModule):
                 p.requires_grad = True
                 
         self.input_proj = nn.Linear(self.latent_dim, latent_dim)
-        self.output_proj = nn.Sequential(
-            nn.Linear(latent_dim, latent_dim),
-            nn.ReLU(),
-            nn.Linear(latent_dim, latent_dim),
-        )
+        
 
 
         self.convs = nn.ModuleList([
@@ -345,7 +344,31 @@ class SheafMultimodalGNN(pl.LightningModule):
             device=self._device
             ) for _ in range(self.num_layers)
         ])
+        self.operation = self.convs[0].operation
+        
+        if self.operation == 'concat':
+            self.output_proj = nn.Sequential(
+            nn.Linear(latent_dim+1, latent_dim),
+            nn.ReLU(),
+            nn.Linear(latent_dim, latent_dim),
+        )
+        else:
+            self.output_proj = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim),
+            nn.ReLU(),
+            nn.Linear(latent_dim, latent_dim),
+        )
 
+    def modify_output(self, input_data, maps):
+        if self.operation == 'sum':
+            output = input_data + maps
+        elif self.operation == 'product':
+            output = input_data * maps
+        elif self.operation == 'concat':
+            output = torch.cat([input_data, maps], dim=1)
+        else:
+            raise ValueError(f'Operation {self.operation} not recognized.')
+        return output
 
     def forward(self, x_img, x_text, edge_index, edge_attr, split='train') -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -379,21 +402,24 @@ class SheafMultimodalGNN(pl.LightningModule):
 
         h_list = []
         edge_losses = []
+        all_maps = []
         for i, conv in enumerate(self.convs):
             conv.set_graph(edge_index, self.num_nodes)
-            h, edge_loss = conv(t_img, t_txt, edge_attr, split=split)
+            h, edge_loss, maps = conv(t_img, t_txt, edge_attr, split=split)
             h_list.append(h)
+            all_maps.append(maps)
             edge_losses.append(edge_loss)
 
         edge_loss = torch.stack(edge_losses).mean()
+        out_maps = torch.stack(all_maps, dim=0).mean(dim=0)
         out = torch.stack(h_list, dim=0).mean(dim=0)
         
         assert not torch.isnan(out).any(), "NaNs in out before expansion"
-        img_out = out[:len(t_img)][edge_index[0]]
-        txt_out = out[len(t_img):][edge_index[1]]
+        
+        img_out = self.modify_output(out[:len(t_img)][edge_index[0]], out_maps)
+        txt_out = self.modify_output(out[len(t_img):][edge_index[1]],out_maps)
         
         out = torch.cat([img_out, txt_out], dim=0)
-        print(out.shape)
         assert not torch.isnan(out).any(), "NaNs in out after duplication"
         
         out = self.output_proj(out)
@@ -410,6 +436,9 @@ class SheafMultimodalGNN(pl.LightningModule):
         img_emb = F.normalize(embeddings[: len(edge_attr), :], dim=1)
         txt_emb = F.normalize(embeddings[len(edge_attr):, :], dim=1)
         
+        print(f"Embeddings shape: {embeddings.shape}")
+        
+        print(f"img emb: {img_emb.shape}, text emb: {txt_emb.shape}")
         sim_matrix = img_emb @ txt_emb.T
         print("Similarity matrix (val):", sim_matrix[:5, :5])
 
