@@ -153,31 +153,31 @@ def log_verbose(model, loss_clip, loss_edge, layer_prefixes=None):
                 print(f"Grad norm | Group [{group_name:<12}] = {(tot_sq ** 0.5):.6f}")
 
                   
-class GraphEdgeDataset(torch.utils.data.Dataset):
-    def __init__(self, graph_data: Data, device):
-        self.edge_indices = graph_data.edge_index.t()
-        self.edge_attrs = graph_data.edge_attr
-        self.x = graph_data.x
-        self.device = device
+# class GraphEdgeDataset(torch.utils.data.Dataset):
+#     def __init__(self, graph_data: Data, device):
+#         self.edge_indices = graph_data.edge_index.t()
+#         self.edge_attrs = graph_data.edge_attr
+#         self.x = graph_data.x
+#         self.device = device
         
-    def __len__(self):
-        return len(self.edge_indices)
+#     def __len__(self):
+#         return len(self.edge_indices)
     
-    def __getitem__(self, idx):
+#     def __getitem__(self, idx):
         
-        edge = self.edge_indices[idx]
-        edge_attr = self.edge_attrs[idx]
-        nodes = torch.unique(edge)
-        batch_x = [self.x[int(n)] for n in nodes]
-        batch_img = torch.stack([x for x in batch_x if isinstance(x, torch.Tensor) and x.dim() == 3], dim=0).squeeze(0).to(torch.float32).to(self.device)  # Add batch dimension
+#         edge = self.edge_indices[idx]
+#         edge_attr = self.edge_attrs[idx]
+#         nodes = torch.unique(edge)
+#         batch_x = [self.x[int(n)] for n in nodes]
+#         batch_img = torch.stack([x for x in batch_x if isinstance(x, torch.Tensor) and x.dim() == 3], dim=0).squeeze(0).to(torch.float32).to(self.device)  # Add batch dimension
         
-        if not torch.isfinite(batch_img).all():
-            print("⚠️ Non-finite values in image", idx)
-            batch_img = torch.nan_to_num(batch_img, nan=0.0, posinf=1.0, neginf=0.0)
+#         if not torch.isfinite(batch_img).all():
+#             print("⚠️ Non-finite values in image", idx)
+#             batch_img = torch.nan_to_num(batch_img, nan=0.0, posinf=1.0, neginf=0.0)
         
-        batch_text = torch.stack([x for x in batch_x if isinstance(x, torch.Tensor) and x.dim() == 1], dim=0).squeeze(0).to(torch.long).to(self.device)  # Add batch dimension
+#         batch_text = torch.stack([x for x in batch_x if isinstance(x, torch.Tensor) and x.dim() == 1], dim=0).squeeze(0).to(torch.long).to(self.device)  # Add batch dimension
 
-        return batch_img, batch_text, edge, edge_attr
+#         return batch_img, batch_text, edge, edge_attr
 
 
 def check_images(x_img, x_text):# write first image to file
@@ -194,6 +194,8 @@ def check_images(x_img, x_text):# write first image to file
     
  
 def process_batch(batch, split='train', check_images_=False):
+    print(batch)
+    #TODO: Here we have an errorr!!!!
     x_img, x_text, edge_index, edge_attr = batch
     #(200, 3, 224, 224), (200, 77), (2, 200), (200, 77)
     #  x_img[0] = 2304, x_txt[0] = 2307, edge_index[0] = (2304,2307), 

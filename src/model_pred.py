@@ -3,195 +3,333 @@ import torch.nn as nn
 import pytorch_lightning as pl
 import torch.nn.functional as F
 import open_clip
+from typing import Union, Tuple
 from src.metrics import *
 from src.losses import clip_loss
 from src.utils import *
 
-from typing import Optional, Tuple, Dict
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from typing import Optional, Dict
+class MultiheadEdgeAttention(nn.Module):
+    """
+    Bipartite multi-head attention that produces:
+      - logits_ij:  [N_img, N_txt] (images as queries, texts as keys)
+      - logits_ji:  [N_txt, N_img] (texts as queries, images as keys)
 
-class JointMapAndEdgeHead(nn.Module):
-    def __init__(self, latent_dim: int, edge_attr_dim: int, hidden_dim: int = 128):
+    An optional edge attribute bias is added *only* at known positive edges (teacher edges).
+    """
+    def __init__(self, latent_dim: int, edge_attr_dim: int, num_heads: int = 4, head_dim: int = 64, bias_from_edges: bool = True):
         super().__init__()
-        self.latent_dim = latent_dim
-        self.edge_attr_dim = edge_attr_dim
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.embed_dim = num_heads * head_dim
+        self.scale = head_dim ** 0.5
+        self.bias_from_edges = bias_from_edges
 
-        self.body = nn.Sequential(
-            nn.Linear(4 * latent_dim + edge_attr_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU()
-        )
+        # Projections
+        self.q_img = nn.Linear(latent_dim + edge_attr_dim, self.embed_dim)
+        self.k_txt = nn.Linear(latent_dim + edge_attr_dim, self.embed_dim)
 
-        self.out_map = nn.Linear(hidden_dim, 2) # m_ij and m_ji
-        self.out_edge = nn.Linear(hidden_dim, 1) # edge logit
+        self.q_txt = nn.Linear(latent_dim + edge_attr_dim, self.embed_dim)
+        self.k_img = nn.Linear(latent_dim + edge_attr_dim, self.embed_dim)
 
+        
+    @staticmethod
+    def _to_heads(x: torch.Tensor, H: int, D: int) -> torch.Tensor:
+        # x: [N, H*D] -> [N, H, D]
+        return x.view(x.size(0), H, D)
+    
+    # in MultiheadEdgeAttention
+    def infer_logits(self, x_img: torch.Tensor, x_txt: torch.Tensor, 
+                     edge_attr: Optional[torch.Tensor] = None) -> dict:
+        """
+        Compute dense logits without any edge bias (no edge_index, no edge_attr).
+        Returns:
+        - logits_ij: [N_img, N_txt]
+        - logits_ji: [N_txt, N_img]
+        """
+        H, D = self.num_heads, self.head_dim
+        
+        x_img = torch.cat([x_img, edge_attr], dim=-1)
+        x_txt = torch.cat([x_txt, edge_attr], dim=-1)
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor):
-        s, t = edge_index
-        xi, xj = x[s], x[t]
-        pairwise_feat = torch.cat([xi, xj, (xi - xj).abs(), xi * xj], dim=-1)
-        h = torch.cat([pairwise_feat, edge_attr], dim=-1)
-        out = self.body(h)
-        m_ij, m_ji = torch.tanh(self.out_map(out)).T
-        logit = self.out_edge(out).squeeze(-1)
+        q_i = self._to_heads(self.q_img(x_img), H, D)   # [N_img, H, D]
+        k_j = self._to_heads(self.k_txt(x_txt), H, D)   # [N_txt, H, D]
+        q_j = self._to_heads(self.q_txt(x_txt), H, D)   # [N_txt, H, D]
+        k_i = self._to_heads(self.k_img(x_img), H, D)   # [N_img, H, D]
+
+        dots_ij = torch.einsum('ihd,jhd->hij', q_i, k_j) / self.scale
+        logits_ij = dots_ij.mean(dim=0)  # [N_img, N_txt]
+
+        dots_ji = torch.einsum('jhd,ihd->hji', q_j, k_i) / self.scale
+        logits_ji = dots_ji.mean(dim=0)  # [N_txt, N_img]
+        
+        return {"logits_ij": logits_ij, "logits_ji": logits_ji}
+
+    def forward(
+        self,
+        x_img: torch.Tensor,  # [N_img, d]
+        x_txt: torch.Tensor,  # [N_txt, d]
+        pos_ei_img_txt: torch.Tensor,  # [2, E_pos] with text indices in [0..N_txt-1], image indices in [0..N_img-1]
+        edge_attr_pos: Optional[torch.Tensor] = None,  # [E_pos, Fe] for positives only
+        split: str = "train"
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Returns a dict with:
+          - logits_ij: [N_img, N_txt]
+          - logits_ji: [N_txt, N_img]
+          - m_ij_pos:  [E_pos] (tanh of logits_ij at positive edges)
+          - m_ji_pos:  [E_pos] (tanh of logits_ji at positive edges, reversed)
+        """
+        # splitting edge attribute for images and texts (as if the edge was split)
+        aggs = self.infer_logits(x_img, x_txt, edge_attr=edge_attr_pos)
+        
+        logits_ij = aggs["logits_ij"]  # [N_img, N_txt]
+        logits_ji = aggs["logits_ji"]  # [N_txt, N_img]
+        
+
         return {
-            "m_ij": m_ij,
-            "m_ji": m_ji,
-            "logit": logit
+            "logits_ij": logits_ij,
+            "logits_ji": logits_ji,
         }
 
 
 class SheafConvLayer(nn.Module):
-    def __init__(
-        self,
-        latent_dim: int,
-        edge_attr_dim: int,
-        step_size: float = 0.4,
-        num_neg_edges: int = 256,
-        device: str = "cpu",
-        verbose: bool = True,
-        print_prefix: str = "[SheafConv]"
-    ):
+    def __init__(self, latent_dim, edge_attr_dim, step_size=1.0, device='cpu',
+                 num_heads=8, head_dim=256, operation='sum'):
+        
         super().__init__()
-        self.latent_dim = latent_dim
-        self.edge_attr_dim = edge_attr_dim
+        self.device = device
         self.step_size = step_size
-        self.num_neg_edges = num_neg_edges
-        self.device_str = device
-        self.verbose = verbose
-        self.prefix = print_prefix + " "
+        self.latent_dim = latent_dim
+        self.operation = operation
 
-        self.map_head = JointMapAndEdgeHead(latent_dim, edge_attr_dim)  # predicts m_ij, m_ji, logit
-        self.linear = nn.Linear(latent_dim, latent_dim)
+        self.sheaf_learner = nn.Sequential(
+            nn.Linear(2 * latent_dim + edge_attr_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+            #nn.Sigmoid(),#nn.Tanh()
+        ).to(device)
 
-        self._teacher_ei: Optional[torch.Tensor] = None   # [2, E_pos]
-        self._num_nodes: Optional[int] = None
+        self.attn = MultiheadEdgeAttention(latent_dim, edge_attr_dim, num_heads=num_heads, head_dim=head_dim)
+        
+        self.linear = nn.Linear(latent_dim, latent_dim).to(device)
+        self.edge_index = None
+        self.left_idx = None
+        self.right_idx = None
+        self.num_nodes = None
 
     def set_graph(self, edge_index: torch.Tensor, num_nodes: int):
-        self._teacher_ei = edge_index.detach()
-        self._num_nodes = int(num_nodes)
+        self.edge_index = edge_index.to(self.device)
+        self.num_nodes = num_nodes
+        # self.left_idx, self.right_idx = self.compute_left_right_map_index()
 
-    @staticmethod
-    def _build_sheaf_laplacian_from_pos(
-        pos_ei: torch.Tensor,     # [2, E_pos]
-        m_ij: torch.Tensor,       # [E_pos]
-        m_ji: torch.Tensor,       # [E_pos]
-        num_nodes: int,
-        device: torch.device,
-        stabilize: float = 1.0
-    ) -> torch.sparse.Tensor:
+    def compute_left_right_map_index(self) -> tuple:
         """
-        Build sparse symmetric Laplacian:
-          L_ij = - m_ij * m_ji  for i!=j edges (i->j)
-          L_ii = sum_{i->k} (m_ik)^2
-        Normalized with D^{-1/2} on both sides (light).
+        Constructs index maps for symmetric edges (s,t) and (t,s).
+        This allows symmetric Laplacian normalization across directed edges.
+
+        Returns:
+            tuple: (Tensor, Tensor) Indices into left and right edge pairs.
+        """
+        edge_to_idx = {} 
+
+        for e in range(self.edge_index_ext.size(1)): 
+            s, t = self.edge_index_ext[0, e].item(), self.edge_index_ext[1, e].item() 
+            edge_to_idx[(s, t)] = e 
+        left_index, right_index = [], [] 
+        
+        for e in range(self.edge_index_ext.size(1)): 
+            s, t = self.edge_index_ext[0, e].item(), self.edge_index_ext[1, e].item() 
+            left_index.append(e)  
+            # If reverse edge (t,s) doesn't exist, fallback to same edge
+            right_index.append(edge_to_idx.get((t, s), e)) 
+        
+        return (torch.tensor(left_index), 
+                torch.tensor(right_index))
+        
+    def predict_restriction_maps(
+        self, 
+        x_row: torch.Tensor,
+        x_col: torch.Tensor,
+        edge_attr: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Learns restriction map weights for each edge based on endpoint node features and edge attributes.
+
+        Args:
+            x (torch.Tensor): Node features [num_nodes, latent_dim].
+            edge_attr (torch.Tensor): Edge attributes [num_edges, edge_attr_dim].
+
+        Returns:
+            torch.Tensor: Map values [num_edges, 1].
+        """
+        edge_inputs = torch.cat([x_row.to(self.device), x_col.to(self.device), edge_attr.to(self.device)], dim=1)
+        maps = self.sheaf_learner(edge_inputs)  # Output a scalar map per edge
+        return maps
+    
+    def build_laplacian(self, maps: torch.Tensor) -> torch.Tensor:
+        """
+        Builds the Laplacian matrix using learned restriction maps.
+
+        Args:
+            maps (torch.Tensor): Restriction map scalars per edge [num_edges, 1].
+
+        Returns:
+            torch.Tensor: Normalized Laplacian [num_nodes, num_nodes].
         """
         device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
-        s, t = pos_ei.to(device_2)
-        E = s.numel()
-        m_ij = m_ij.to(device_2)
-        m_ji = m_ji.to(device_2)
+        row, col = self.edge_index.to(device_2)
+        maps = maps.to(device_2)
         
+        #print(maps)
+        #exit()
         
-        # Diagonal: sum of squared outgoing maps
-        diag = torch.zeros(num_nodes, device=device_2)
-        diag.index_add_(0, s, m_ij.pow(2))  # ∑_k m_ik^2
+        # left_maps = maps[self.left_idx.to(device_2)]
+        # right_maps = maps[self.right_idx.to(device_2)]
 
-        # Off-diagonal (i,j): - m_ij * m_ji
-        off_vals = -(m_ij * m_ji)  # [E]
+        # Off-diagonal entries are negative product of opposite maps
+        non_diag = maps**2 #-left_maps * right_maps  # [num_edges, 1]
 
-        # Light symmetric normalization
-        d_hat = (diag + stabilize).pow(-0.5)   # [N]
-        left = d_hat[s]                        # [E]
-        right = d_hat[t]                       # [E]
+        # Diagonal entries are sum of squared maps
+        diag = torch.zeros(self.num_nodes, device=device_2)
+        diag.index_add_(0, row, (maps.squeeze() ** 2))  # Accumulate per node
 
-        off_vals = off_vals * left * right     # normalized off-diag
-        diag_vals = d_hat * diag * d_hat       # normalized diag
+        # Normalize Laplacian
+        d_sqrt_inv = (diag + 1).pow(-0.5)  # add 1 for numerical stability
+        left_norm = d_sqrt_inv[row]
+        right_norm = d_sqrt_inv[col]
+        norm_maps = left_norm * non_diag.squeeze() * right_norm
+        diag_norm = d_sqrt_inv * diag * d_sqrt_inv
 
-        # Build sparse COO
-        diag_idx = torch.arange(num_nodes, device=device_2)
-        idx = torch.cat([
-            torch.stack([diag_idx, diag_idx], dim=0),  # (i,i)
-            torch.stack([s, t], dim=0)                 # (i,j)
+        # Construct sparse matrix indices and values
+        diag_idx = torch.arange(self.num_nodes, device=device_2)
+        indices = torch.cat([
+            torch.stack([diag_idx, diag_idx], dim=0),
+            torch.stack([row, col], dim=0)
         ], dim=1)
-        vals = torch.cat([diag_vals, off_vals], dim=0)
-
-        L = torch.sparse_coo_tensor(idx, vals, (num_nodes, num_nodes))
+        values = torch.cat([diag_norm, norm_maps])
+        laplacian = torch.sparse_coo_tensor(indices, values, (self.num_nodes, self.num_nodes))
+        return laplacian.coalesce()
     
-        return L.coalesce()
+    # def build_laplacian(self, maps: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    #     """
+    #     Builds the Laplacian matrix using learned restriction maps.
 
+    #     Args:
+    #         maps (torch.Tensor): Restriction map scalars per edge [num_edges, 1].
 
-    def forward(self, x: torch.Tensor, edge_attr_pos: torch.Tensor):
-        """
-        x:               [N, d]
-        edge_attr_pos:   [E_pos, edge_attr_dim]  (only teacher positives)
-        """
-        device_2 = 'gpu' if torch.cuda.is_available() else 'cpu'
-        N = x.size(0)
-        device = x.device
-
-        if self._teacher_ei is None or self._num_nodes is None:
-            raise ValueError("Teacher edges and num_nodes must be set with `set_graph`")
-
-        pos_ei = self._teacher_ei.to(device)  # [2, E_pos]
-        E_pos = pos_ei.size(1)
-
-        # 1) Sample negatives for the EDGE CLASSIFIER (not used in MP)
-        ei_all, edge_attr_all, labels = sample_edges_with_negatives_cf_guidance(
-            pos_ei, edge_attr_pos, N, self.num_neg_edges, device 
-        )  # ei_all:[2, E_pos+E_neg], edge_attr_all:[E_all, F_e], labels:[E_all]
-
-        # 2) Predict maps & edge logits for ALL edges (pos+neg)
-        maps = self.map_head(x, ei_all, edge_attr_all)  # per-edge
-        m_ij_all = maps["m_ij"].view(-1)
-        m_ji_all = maps["m_ji"].view(-1)
-        logits   = maps["logit"].view(-1)
-
-        # 3) Edge BCE (use logits)
-        edge_loss = F.binary_cross_entropy_with_logits(logits, labels.float())
-        probs     = torch.sigmoid(logits)
-        preds     = (probs > 0.5).float()
-        acc       = (preds == labels).float().mean().item()
-
-        # 4) Build sheaf Laplacian ONLY from teacher positives, using the corresponding m_ij/m_ji
-        #    Because we concatenated [pos, neg], positives are the first E_pos entries.
-        m_ij_pos = m_ij_all[:E_pos]
-        m_ji_pos = m_ji_all[:E_pos]
-
-        L = self._build_sheaf_laplacian_from_pos(
-            pos_ei, m_ij_pos, m_ji_pos, num_nodes=N, device=device, stabilize=1.0
-        )
-
-        # 5) Linear map then one Laplacian step (like your old version)
-        y = self.linear(x)                                   # [N, d]
-        out = torch.sparse.mm(L, y.to(device_2)).to(y.device)                          # [N, d]
-        x_out = x - self.step_size * out
-
-        if self.verbose:
-            print(f"[{self.prefix}edge pred] acc={acc:.2%}, E_all={labels.numel()}")
-            nv = out.norm().item()
-            print(f"[{self.prefix}laplacian step] ||L y||={nv:.4f}, N={N}, d={y.size(1)}")
+    #     Returns:
+    #         torch.Tensor: Normalized Laplacian [num_nodes, num_nodes].
+    #     """
+    #     #device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
+    #     src, tgt = self.edge_index  # [E]
+    #     y = self.linear(x)
         
-        assert edge_attr_pos.dim() == 2 and edge_attr_pos.size(0) == self._teacher_ei.size(1)
-        assert m_ij_all.numel() == ei_all.size(1) == edge_attr_all.size(0) == labels.numel()
-        s_pos, t_pos = pos_ei
-        assert s_pos.max() < x.size(0) and t_pos.max() < x.size(0)
+    #     r = maps.view(-1, 1)   # [E, 1]
+    #     r2 = r * r                                                  # [E, 1]
 
+    #     y_src = y[src]                                             # [E, d]
+    #     y_tgt = y[self.num_img_nodes + tgt]                                             # [E, d]
+    
+    #     out = torch.zeros_like(y)                                  # [N, d]
+            
+    #     bad = (src < 0) | (src >= self.num_nodes) | (tgt < 0) | (tgt >= self.num_nodes) | (~torch.isfinite(r).all(dim=1))
+    #     if bad.any():
+    #         good = ~bad
+    #         src, tgt, r = src[good], tgt[good], r[good]
 
-        aux = {
-            "edge_index_pred": ei_all,
-            "edge_probs": probs.detach(),
-            "losses": edge_loss,
-            "acc": acc
-        }
+    #     # out[src] +=  r * y_tgt
+    #     tmp = y_tgt * r
+    #     out.index_add_(0, src, tmp)
+    
+    #     # out[src] += - y_src
+    #     out.index_add_(0, src, -y_src)
+    
+    #     # out[tgt] += - (r^2) * y_tgt
+    #     tmp = y_tgt * r2
+    #     out.index_add_(0, self.num_img_nodes +  tgt, -tmp)
+    
+    #     # out[tgt] +=  r * y_src
+    #     tmp = y_src * r
+    #     out.index_add_(0, self.num_img_nodes +  tgt, tmp)
+
+    #     return out
+
+    def compute_attention_loss(self, logits_ij: torch.Tensor, logits_ji: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """
+        Computes a loss to encourage symmetry in attention logits.
+
+        Args:
+            logits_ij (torch.Tensor): Logits from images to texts [N_img, N_txt].
+            logits_ji (torch.Tensor): Logits from texts to images [N_txt, N_img].
+
+        Returns:
+            torch.Tensor: Symmetry loss scalar.
+        """
         
-        return x_out, aux
+        loss_i2t = torch.nn.functional.cross_entropy(logits_ij, labels)
+        loss_t2i = torch.nn.functional.cross_entropy(logits_ji, labels.t())
+        edge_loss = 0.5 * (loss_i2t + loss_t2i) 
+        
+        return edge_loss
 
+    def forward(self, x_img, x_txt, edge_attr, split='train') -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass through the sheaf convolution layer.
 
+        Args:
+            x (Tensor): Input node features [num_nodes, latent_dim]
+            edge_attr (Tensor): Edge features [num_edges, edge_attr_dim]
+
+        Returns:
+            Tensor: Updated node features [num_nodes, latent_dim]
+        """
+        #device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
+        
+        # expanding to duplicated vals
+        x_img_ext = x_img[self.edge_index[0]]
+        x_txt_ext = x_txt[self.edge_index[1]]
+        
+        
+        
+        labels = torch.eye(len(x_img_ext), len(x_txt_ext), device=x_txt_ext.device)
+        
+        attn_out = self.attn(x_img_ext, x_txt_ext, self.edge_index, edge_attr, split=split)
+        logits_ij = attn_out["logits_ij"]  # [N_img, N_txt]
+        logits_ji = attn_out["logits_ji"]  # [N_txt, N_img]
+        
+        new_left_idx = logits_ij.argmax(dim=0)  # [N_img]
+        new_right_idx = logits_ij.argmax(dim=1)  # [N_txt]
+
+        print('number of correctly predicted edges:', (new_left_idx == torch.arange(len(new_left_idx), device=new_left_idx.device)).sum().item(), 'out of', new_left_idx.size(0))
+        print('number of correctly predicted edges:', (new_right_idx == torch.arange(len(new_right_idx), device=new_right_idx.device)).sum().item(), 'out of', new_right_idx.size(0))
+
+        #if split == "test":
+         #   self.left_idx, self.right_idx = new_left_idx, new_right_idx
+        #else:
+         #   self.left_idx, self.right_idx = self.compute_left_right_map_index()
+        
+        maps = self.predict_restriction_maps(x_img_ext, x_txt_ext, edge_attr)
+        x = torch.cat([x_img, x_txt], dim=0)
+        self.num_img_nodes = len(x_img)
+        
+        #out = self.build_laplacian(maps, x)
+        
+        laplacian = self.build_laplacian(maps)
+        
+        
+        #x =  x - self.step_size * out  # Laplacian update
+        
+        y = self.linear(x)
+        x = x - self.step_size * torch.sparse.mm(laplacian, y.to(self.device)).to(y.device)
+        
+        
+        edge_loss = self.compute_attention_loss(logits_ij, logits_ji, labels)
+        
+        assert not torch.isnan(x).any(), "NaNs in input to conv"
+        assert not torch.isnan(maps).any(), "NaNs in maps"
+        assert not torch.isnan(laplacian).any(), "NaNs in laplacian"
+        return x, edge_loss, maps
+    
 class SheafMultimodalGNN(pl.LightningModule):
     def __init__(
         self,
@@ -201,149 +339,218 @@ class SheafMultimodalGNN(pl.LightningModule):
         step_size: float = 1.0,
         lr: float = 1e-3,
         device: str = 'cpu',
-        w_edge_bce: float = 10,
         w_clip: float = 1.0,
-        sheaf_verbose: bool = True,
+        w_edge_bce: float = 0#1.0
     ):
         super().__init__()
         self.save_hyperparameters()
         self.latent_dim = latent_dim
         self.num_layers = num_layers
-        self.step_size  = step_size
-        self.lr         = lr
-        self._device    = device
+        self.step_size = step_size
+        self.lr = lr
+        self._device = device
 
-        # loss weights
-        self.w_edge_bce = w_edge_bce
-        self.w_clip = w_clip
-        
         self.num_nodes = None
+        
+        self.w_clip = w_clip
+        self.w_edge_bce = w_edge_bce
 
         self.clip_model, _, _ = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
         self.clip_model = self.clip_model.to(self._device)
-        for p in self.clip_model.parameters(): 
-            p.requires_grad = False
+        
+        for param in self.clip_model.parameters():
+            param.requires_grad = False
         
         self.clip_model.visual.proj.requires_grad = True
         self.clip_model.text_projection.requires_grad = True
+        
+        # ---- unfreeze the last TWO transformer blocks ----
+        # vision tower
+        for block in list(self.clip_model.visual.transformer.resblocks)[-3:]:
+            for p in block.parameters():
+                p.requires_grad = True
+        
+        # text tower
+        for block in list(self.clip_model.transformer.resblocks)[-3:]:
+            for p in block.parameters():
+                p.requires_grad = True
+        
+        # (optional) also unfreeze the final layer norms right before the heads
+        if hasattr(self.clip_model.visual, "ln_post"):
+            for p in self.clip_model.visual.ln_post.parameters():
+                p.requires_grad = True
+        if hasattr(self.clip_model, "ln_final"):  # text LN
+            for p in self.clip_model.ln_final.parameters():
+                p.requires_grad = True
+                
+        self.input_proj = nn.Linear(self.latent_dim, latent_dim)
+        
 
-        self.input_proj  = nn.Linear(self.latent_dim, latent_dim)
-        # self.output_proj = nn.Linear(latent_dim, latent_dim)
 
         self.convs = nn.ModuleList([
             SheafConvLayer(
-                latent_dim,
-                edge_attr_dim,
-                step_size=self.step_size,
-                device=self._device,
-                verbose=sheaf_verbose
+            latent_dim,
+            edge_attr_dim,
+            step_size=self.step_size,
+            device=self._device
             ) for _ in range(self.num_layers)
         ])
-
-    def on_train_epoch_start(self):
-        if self.current_epoch < 3:
-            self.w_edge_bce = 5.0
-            self.w_clip = 1.0
+        self.operation = self.convs[0].operation
+        
+        if self.operation == 'concat':
+            self.output_proj = nn.Sequential(
+            nn.Linear(latent_dim+1, latent_dim),
+            nn.ReLU(),
+            nn.Linear(latent_dim, latent_dim),
+        )
         else:
-            
-            self.w_edge_bce = 0.0
-            self.w_clip = 1.0
-            for conv in self.convs:
-                for _, p in conv.map_head.named_parameters():
-                    p.requires_grad = False  # freeze map prediction net
-            # print("🧊 Freezing edge prediction network")
+            self.output_proj = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim),
+            nn.ReLU(),
+            nn.Linear(latent_dim, latent_dim),
+        )
+
+    def modify_output(self, input_data, maps):
+        if self.operation == 'sum':
+            output = input_data + maps
+        elif self.operation == 'product':
+            output = input_data * maps
+        elif self.operation == 'concat':
+            output = torch.cat([input_data, maps], dim=1)
+        else:
+            raise ValueError(f'Operation {self.operation} not recognized.')
+        return output
+
+    def forward(self, x_img, x_text, edge_index, edge_attr, split='train') -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Forward pass through the full GNN.
+
+        Args:
+            x (Tensor): Node features [num_nodes, input_dim] or [1, num_nodes, input_dim]
+
+        Returns:
+            Tensor: Final node embeddings [num_nodes, latent_dim]
+        """
         
-        print(f"[Epoch {self.current_epoch}] w_edge_bce={self.w_edge_bce}, w_clip={self.w_clip}")
-
-
-    def forward(self, x_img, x_text, edge_index, edge_attr):
-        # encode attributes and nodes
         with torch.no_grad():
-            edge_attr = self.clip_model.encode_text(edge_attr)
+            edge_attr = self.clip_model.encode_text(edge_attr) 
+
+        t_img = self.clip_model.encode_image(x_img)  # Encode image features
+        t_text = self.clip_model.encode_text(x_text)  # Encode text features
         
-        t_img = self.clip_model.encode_image(x_img)
-        t_text = self.clip_model.encode_text(x_text)
-        
+        self.num_nodes = t_img.size(0) + t_text.size(0)
         if torch.isnan(t_img).any():
-            print("⚠️ Non-finite values in image embeddings")
-            print('before', torch.isnan(x_img).any().item(), torch.isnan(x_img).sum().item())
-            print('after', torch.isnan(t_img).sum().item())
-
-        assert not torch.isnan(t_img).any()
-        assert not torch.isnan(t_text).any()
-
-        t = torch.stack([t_img, t_text], dim=0).view(-1, t_img.size(1))
-        edge_index[1, :] = edge_index[1, :] + len(t_img)  # shift text indices
-        self.num_nodes = t.size(0)
-
-        t = self.input_proj(t)
-        h_list, losses_accum, acc = [], 0, 0
-
-        for i, conv in enumerate(self.convs):
-            conv.set_graph(edge_index, self.num_nodes)  # teacher for alignment/supervision
-            h, aux = conv(t, edge_attr)              # NOTE: 3 returns now
-            h_list.append(h)
-            t = h  # next input
-
-            # accumulate losses if present
-            if aux and "losses" in aux:
-                losses_accum += aux["losses"]
-            if aux and "acc" in aux:
-                acc += aux["acc"]
+            print(x_img.min(), x_img.max())
             
-        # LightGCN-style mean
-        out = torch.stack(h_list, dim=0).mean(dim=0)
-        # out = self.output_proj(out)
-
-        # average losses across layers that had labels
-        aux_total = {}
-        denom = max(1, len(self.convs))
-        aux_total["losses"] = losses_accum / denom
-        aux_total["acc"] = acc / denom
+        assert not torch.isnan(t_img).any(), "NaNs in CLIP image encoder"
+        assert not torch.isnan(t_text).any(), "NaNs in CLIP text encoder"
         
-        return out, aux_total, edge_index
+        t_img = self.input_proj(t_img) # at some point pass to concatenation immediately
+        t_txt = self.input_proj(t_text)
+        
+        assert not torch.isnan(t_img).any(), "NaNs after input_proj"
+        assert not torch.isnan(t_text).any(), "NaNs after input_proj"
 
+        h_list = []
+        edge_losses = []
+        all_maps = []
+        for i, conv in enumerate(self.convs):
+            conv.set_graph(edge_index, self.num_nodes)
+            h, edge_loss, maps = conv(t_img, t_txt, edge_attr, split=split)
+            h_list.append(h)
+            all_maps.append(maps)
+            edge_losses.append(edge_loss)
+
+        edge_loss = torch.stack(edge_losses).mean()
+        out_maps = torch.stack(all_maps, dim=0).mean(dim=0)
+        out = torch.stack(h_list, dim=0).mean(dim=0)
+        
+        assert not torch.isnan(out).any(), "NaNs in out before expansion"
+        
+        img_out = self.modify_output(out[:len(t_img)][edge_index[0]], out_maps)
+        txt_out = self.modify_output(out[len(t_img):][edge_index[1]],out_maps)
+        
+        out = torch.cat([img_out, txt_out], dim=0)
+        assert not torch.isnan(out).any(), "NaNs in out after duplication"
+        
+        out = self.output_proj(out)
+        
+        assert not torch.isnan(out).any(), "NaNs in out after proj"
+        return out, edge_index, edge_loss
+    
     def step(self, batch, batch_idx, split='train'):
         
-        x_img, x_text, edge_index, edge_attr = process_batch(batch, split=split)
+        x_img, x_text, edge_index, edge_attr = process_batch(batch, split='sheaf') # for some reason edge_idx[0] != edge_idx[1] 
+        
+        # Forward pass to get all embeddings
+        embeddings, _, edge_loss = self.forward(x_img, x_text, edge_index, edge_attr, split=split)
+        img_emb = F.normalize(embeddings[: len(edge_attr), :], dim=1)
+        txt_emb = F.normalize(embeddings[len(edge_attr):, :], dim=1)
+        
+        #print(f"Embeddings: {embeddings}")
+        
+        #print(f"img emb: {img_emb.shape}, text emb: {txt_emb.shape}")
+        sim_matrix = img_emb @ txt_emb.T
+        
+        #print("Similarity matrix (val):", sim_matrix[:5, :5])
 
-        embeddings, aux, edge_index = self.forward(x_img, x_text, edge_index, edge_attr)
-        img_emb = F.normalize(embeddings[edge_index[0, :]], dim=1)
-        txt_emb = F.normalize(embeddings[edge_index[1, :]], dim=1)
-        # print(img_emb.shape, txt_emb.shape, 'final emb shapes')
+        loss_clip = clip_loss(img_emb, txt_emb)
         
-        aux_losses = aux["losses"] if aux and "losses" in aux else {}
-        aux_acc = aux["acc"] if aux and "acc" in aux else {}
-
-        loss_main = clip_loss(img_emb, txt_emb)
-        edge_bce = aux_losses
-        
-        loss = (
-            self.w_clip * loss_main
-            + self.w_edge_bce * edge_bce
-            
-        )
-        
-        # logs
-        self.log(f'{split}_loss', loss, prog_bar=True, on_epoch=True, on_step=False)
-        self.log(f'{split}_clip', loss_main, prog_bar=True, on_epoch=True, on_step=False)
-        self.log(f'{split}_acc', aux_acc, prog_bar=True, on_epoch=True, on_step=False)
-        self.log("w_edge_bce", self.w_edge_bce, prog_bar=True, on_step=False, on_epoch=True)
-        self.log("w_clip", self.w_clip, prog_bar=True, on_step=False, on_epoch=True)
-        
-        if split != 'test':
-            self.log(f'{split}_edge_bce', edge_bce, prog_bar=True, on_epoch=True, on_step=False)
+        loss = self.w_clip * loss_clip + self.w_edge_bce * edge_loss
 
         metrics_i2t = compute_clip_metrics(img_emb, txt_emb)
         metrics_t2i = compute_clip_metrics(txt_emb, img_emb)
+        self.log(f'{split}_loss_clip', loss_clip, prog_bar=True, on_epoch=True, on_step=False,)
+        self.log(f'{split}_loss_edge', edge_loss, prog_bar=True, on_epoch=True, on_step=False,)
+
+        self.log(f'{split}_loss', loss, prog_bar=True, on_epoch=True, on_step=False,)
         for name, value in metrics_i2t.items():
-            self.log(f'{split}_i2t_{name}', value, prog_bar=True, on_epoch=True, on_step=False)
+            self.log(f'{split}_i2t_{name}', value, prog_bar=True, on_epoch=True, on_step=False,)
         for name, value in metrics_t2i.items():
-            self.log(f'{split}_t2i_{name}', value, prog_bar=True, on_epoch=True, on_step=False)
-
-        return loss, metrics_i2t, metrics_t2i, self.w_clip * loss_main, self.w_edge_bce * edge_bce
-
+            self.log(f'{split}_t2i_{name}', value, prog_bar=True, on_epoch=True, on_step=False,)
     
+        
+        # Relation-aware metrics
+        unique_rels = torch.unique(edge_attr, dim=0)
+
+        for rel in unique_rels:
+            rel_mask = (edge_attr == rel).all(axis=1)
+            if rel_mask.sum() == 0:
+                continue  # skip empty group
+            
+            img_emb_rel = img_emb[rel_mask]
+            txt_emb_rel = txt_emb[rel_mask]
+        
+            # Normalize again (optional if already normalized)
+            img_emb_rel = F.normalize(img_emb_rel, dim=1)
+            txt_emb_rel = F.normalize(txt_emb_rel, dim=1)
+        
+            # Compute metrics on this subset
+            rel_metrics_i2t = compute_clip_metrics(img_emb_rel, txt_emb_rel)
+            rel_metrics_t2i = compute_clip_metrics(txt_emb_rel, img_emb_rel)
+        
+            tokenizer = open_clip.get_tokenizer('ViT-B-32')
+            fingerprint = tokenizer.decode(rel.cpu().numpy()).strip('!').replace('<start_of_text>', '').replace('<end_of_text>', '' ).strip()
+            for name, value in rel_metrics_i2t.items():
+                self.log(f'{split}_rel_{fingerprint}_i2t_{name}', value, prog_bar=False, on_epoch=True, on_step=False)
+            for name, value in rel_metrics_t2i.items():
+                self.log(f'{split}_rel_{fingerprint}_t2i_{name}', value, prog_bar=False, on_epoch=True, on_step=False)
+
+        # if split == 'val' or split == 'test':
+        #     # Compute metrics
+        #     relation_metrics = compute_relation_aware_metrics(
+        #         embeddings=embeddings,
+        #         edge_index=edge_index,
+        #         edge_attr=edge_attr,
+        #         k_values=[1, 5, 10]
+        #     )
+            
+        #     for relation, value in relation_metrics.items():
+        #         for metric_name, value in value.items():
+        #             self.log(f'{split}_{relation}_{metric_name}', value, prog_bar=True, on_epoch=True, on_step=False,)
+            
+        return loss, metrics_i2t, metrics_t2i, loss_clip, edge_loss
+
     def training_step(self, batch: tuple, batch_idx: int) -> torch.Tensor:
         """
         Training step with symmetric contrastive loss between text and image nodes.
@@ -355,12 +562,12 @@ class SheafMultimodalGNN(pl.LightningModule):
         Returns:
             torch.Tensor: Total loss
         """
-        train_loss, metrics_i2t, metrics_t2i, clip_loss, edge_loss = self.step(batch, batch_idx, split='train')
+        train_loss, metrics_i2t, metrics_t2i, loss_clip, loss_edge = self.step(batch, batch_idx, split='train')
         
         log_verbose(
             self,
-            clip_loss,           # your main CLIP loss tensor
-            edge_loss,           # your edge BCE tensor
+            loss_clip,           # your main CLIP loss tensor
+            loss_edge,           # your edge BCE tensor
             layer_prefixes={
                 "clip_proj": ["clip_model.visual.proj", "clip_model.text_projection"],
                 "input_proj": ["input_proj"],
@@ -368,6 +575,7 @@ class SheafMultimodalGNN(pl.LightningModule):
                 "conv0": ["convs.0.map_head", "convs.0.linear"],
                 "conv1": ["convs.1.map_head", "convs.1.linear"],
                 "conv2": ["convs.2.map_head", "convs.2.linear"],
+                "attn": ["convs.0.attn", "convs.1.attn", "convs.2.attn"],
             }
         )
 
@@ -401,7 +609,6 @@ class SheafMultimodalGNN(pl.LightningModule):
         _, metrics_i2t, metrics_t2i, _, _ = self.step(batch, batch_idx, split='test')
         return {**{f'test_i2t_{k}': v for k, v in metrics_i2t.items()},
                 **{f'test_t2i_{k}': v for k, v in metrics_t2i.items()}}
-
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
         """

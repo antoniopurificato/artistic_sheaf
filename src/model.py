@@ -106,7 +106,7 @@ class SheafConvLayer(nn.Module):
             nn.Linear(2 * latent_dim + edge_attr_dim, 64),
             nn.ReLU(),
             nn.Linear(64, 1),
-            nn.Tanh()
+            #nn.Sigmoid(),#nn.Tanh()
         ).to(device)
 
         self.attn = MultiheadEdgeAttention(latent_dim, edge_attr_dim, num_heads=num_heads, head_dim=head_dim)
@@ -166,7 +166,7 @@ class SheafConvLayer(nn.Module):
         maps = self.sheaf_learner(edge_inputs)  # Output a scalar map per edge
         return maps
     
-    def build_laplacian(self, maps: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    def build_laplacian(self, maps: torch.Tensor) -> torch.Tensor:
         """
         Builds the Laplacian matrix using learned restriction maps.
 
@@ -176,39 +176,83 @@ class SheafConvLayer(nn.Module):
         Returns:
             torch.Tensor: Normalized Laplacian [num_nodes, num_nodes].
         """
-        #device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
-        src, tgt = self.edge_index  # [E]
-        y = self.linear(x)
+        device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
+        row, col = self.edge_index.to(device_2)
+        maps = maps.to(device_2)
         
-        r = maps.view(-1, 1)   # [E, 1]
-        r2 = r * r                                                  # [E, 1]
+        #print(maps)
+        #exit()
+        
+        # left_maps = maps[self.left_idx.to(device_2)]
+        # right_maps = maps[self.right_idx.to(device_2)]
 
-        y_src = y[src]                                             # [E, d]
-        y_tgt = y[self.num_img_nodes + tgt]                                             # [E, d]
+        # Off-diagonal entries are negative product of opposite maps
+        non_diag = maps**2 #-left_maps * right_maps  # [num_edges, 1]
+
+        # Diagonal entries are sum of squared maps
+        diag = torch.zeros(self.num_nodes, device=device_2)
+        diag.index_add_(0, row, (maps.squeeze() ** 2))  # Accumulate per node
+
+        # Normalize Laplacian
+        d_sqrt_inv = (diag + 1).pow(-0.5)  # add 1 for numerical stability
+        left_norm = d_sqrt_inv[row]
+        right_norm = d_sqrt_inv[col]
+        norm_maps = left_norm * non_diag.squeeze() * right_norm
+        diag_norm = d_sqrt_inv * diag * d_sqrt_inv
+
+        # Construct sparse matrix indices and values
+        diag_idx = torch.arange(self.num_nodes, device=device_2)
+        indices = torch.cat([
+            torch.stack([diag_idx, diag_idx], dim=0),
+            torch.stack([row, col], dim=0)
+        ], dim=1)
+        values = torch.cat([diag_norm, norm_maps])
+        laplacian = torch.sparse_coo_tensor(indices, values, (self.num_nodes, self.num_nodes))
+        return laplacian.coalesce()
     
-        out = torch.zeros_like(y)                                  # [N, d]
+    # def build_laplacian(self, maps: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    #     """
+    #     Builds the Laplacian matrix using learned restriction maps.
+
+    #     Args:
+    #         maps (torch.Tensor): Restriction map scalars per edge [num_edges, 1].
+
+    #     Returns:
+    #         torch.Tensor: Normalized Laplacian [num_nodes, num_nodes].
+    #     """
+    #     #device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
+    #     src, tgt = self.edge_index  # [E]
+    #     y = self.linear(x)
+        
+    #     r = maps.view(-1, 1)   # [E, 1]
+    #     r2 = r * r                                                  # [E, 1]
+
+    #     y_src = y[src]                                             # [E, d]
+    #     y_tgt = y[self.num_img_nodes + tgt]                                             # [E, d]
+    
+    #     out = torch.zeros_like(y)                                  # [N, d]
             
-        bad = (src < 0) | (src >= self.num_nodes) | (tgt < 0) | (tgt >= self.num_nodes) | (~torch.isfinite(r).all(dim=1))
-        if bad.any():
-            good = ~bad
-            src, tgt, r = src[good], tgt[good], r[good]
+    #     bad = (src < 0) | (src >= self.num_nodes) | (tgt < 0) | (tgt >= self.num_nodes) | (~torch.isfinite(r).all(dim=1))
+    #     if bad.any():
+    #         good = ~bad
+    #         src, tgt, r = src[good], tgt[good], r[good]
 
-        # out[src] +=  r * y_tgt
-        tmp = y_tgt * r
-        out.index_add_(0, src, tmp)
+    #     # out[src] +=  r * y_tgt
+    #     tmp = y_tgt * r
+    #     out.index_add_(0, src, tmp)
     
-        # out[src] += - y_src
-        out.index_add_(0, src, -y_src)
+    #     # out[src] += - y_src
+    #     out.index_add_(0, src, -y_src)
     
-        # out[tgt] += - (r^2) * y_tgt
-        tmp = y_tgt * r2
-        out.index_add_(0, self.num_img_nodes +  tgt, -tmp)
+    #     # out[tgt] += - (r^2) * y_tgt
+    #     tmp = y_tgt * r2
+    #     out.index_add_(0, self.num_img_nodes +  tgt, -tmp)
     
-        # out[tgt] +=  r * y_src
-        tmp = y_src * r
-        out.index_add_(0, self.num_img_nodes +  tgt, tmp)
+    #     # out[tgt] +=  r * y_src
+    #     tmp = y_src * r
+    #     out.index_add_(0, self.num_img_nodes +  tgt, tmp)
 
-        return out
+    #     return out
 
     def compute_attention_loss(self, logits_ij: torch.Tensor, logits_ji: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """
@@ -256,8 +300,8 @@ class SheafConvLayer(nn.Module):
         new_left_idx = logits_ij.argmax(dim=0)  # [N_img]
         new_right_idx = logits_ij.argmax(dim=1)  # [N_txt]
 
-        print('number of correctly predicted edges:', (new_left_idx == torch.arange(len(new_left_idx), device=new_left_idx.device)).sum().item(), 'out of', new_left_idx.size(0))
-        print('number of correctly predicted edges:', (new_right_idx == torch.arange(len(new_right_idx), device=new_right_idx.device)).sum().item(), 'out of', new_right_idx.size(0))
+        # print('number of correctly predicted edges:', (new_left_idx == torch.arange(len(new_left_idx), device=new_left_idx.device)).sum().item(), 'out of', new_left_idx.size(0))
+        # print('number of correctly predicted edges:', (new_right_idx == torch.arange(len(new_right_idx), device=new_right_idx.device)).sum().item(), 'out of', new_right_idx.size(0))
 
         #if split == "test":
          #   self.left_idx, self.right_idx = new_left_idx, new_right_idx
@@ -268,15 +312,22 @@ class SheafConvLayer(nn.Module):
         x = torch.cat([x_img, x_txt], dim=0)
         self.num_img_nodes = len(x_img)
         
-        out = self.build_laplacian(maps, x)
-        x =  x - self.step_size * out  # Laplacian update
+        #out = self.build_laplacian(maps, x)
+        
+        laplacian = self.build_laplacian(maps)
+        
+        
+        #x =  x - self.step_size * out  # Laplacian update
+        
+        y = self.linear(x)
+        x = x - self.step_size * torch.sparse.mm(laplacian, y.to(self.device)).to(y.device)
         
         
         edge_loss = self.compute_attention_loss(logits_ij, logits_ji, labels)
         
         assert not torch.isnan(x).any(), "NaNs in input to conv"
         assert not torch.isnan(maps).any(), "NaNs in maps"
-        assert not torch.isnan(out).any(), "NaNs in laplacian"
+        assert not torch.isnan(laplacian).any(), "NaNs in laplacian"
         return x, edge_loss, maps
     
 class SheafMultimodalGNN(pl.LightningModule):
@@ -289,7 +340,8 @@ class SheafMultimodalGNN(pl.LightningModule):
         lr: float = 1e-3,
         device: str = 'cpu',
         w_clip: float = 1.0,
-        w_edge_bce: float = 0#1.0
+        w_edge_bce: float = 0,#1.0
+        clip_grad=False
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -310,27 +362,27 @@ class SheafMultimodalGNN(pl.LightningModule):
         for param in self.clip_model.parameters():
             param.requires_grad = False
         
-        self.clip_model.visual.proj.requires_grad = True
-        self.clip_model.text_projection.requires_grad = True
+        self.clip_model.visual.proj.requires_grad = clip_grad
+        self.clip_model.text_projection.requires_grad = clip_grad
         
         # ---- unfreeze the last TWO transformer blocks ----
         # vision tower
         for block in list(self.clip_model.visual.transformer.resblocks)[-3:]:
             for p in block.parameters():
-                p.requires_grad = True
+                p.requires_grad = clip_grad
         
         # text tower
         for block in list(self.clip_model.transformer.resblocks)[-3:]:
             for p in block.parameters():
-                p.requires_grad = True
+                p.requires_grad = clip_grad
         
         # (optional) also unfreeze the final layer norms right before the heads
         if hasattr(self.clip_model.visual, "ln_post"):
             for p in self.clip_model.visual.ln_post.parameters():
-                p.requires_grad = True
+                p.requires_grad = clip_grad
         if hasattr(self.clip_model, "ln_final"):  # text LN
             for p in self.clip_model.ln_final.parameters():
-                p.requires_grad = True
+                p.requires_grad = clip_grad
                 
         self.input_proj = nn.Linear(self.latent_dim, latent_dim)
         
@@ -436,7 +488,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         img_emb = F.normalize(embeddings[: len(edge_attr), :], dim=1)
         txt_emb = F.normalize(embeddings[len(edge_attr):, :], dim=1)
         
-        print(f"Embeddings shape: {embeddings.shape}")
+        print(f"Embeddings: {embeddings}")
         
         print(f"img emb: {img_emb.shape}, text emb: {txt_emb.shape}")
         sim_matrix = img_emb @ txt_emb.T
