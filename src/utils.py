@@ -8,6 +8,32 @@ import torch.nn.functional as F
 import numpy as np
 import os
 
+
+def check_graph_properties(data):
+    """
+    Check if a PyTorch Geometric graph is directed and contains self loops.
+    data: PyTorch Geometric Data object
+    Returns: tuple (is_directed, has_self_loops)
+    """
+    # Controlla se il grafo ha self loops
+    # edge_index ha dimensione [2, num_edges]
+    edge_index = data.edge_index
+    has_self_loops = torch.any(edge_index[0] == edge_index[1]).item()
+
+    # Controlla se il grafo è diretto
+    # Crea un set di tuple di edges
+    edges = set(map(tuple, edge_index.t().tolist()))
+    
+    # Un grafo è non diretto se per ogni edge (u,v) esiste anche (v,u)
+    is_directed = False
+    for edge in edges:
+        if (edge[1], edge[0]) not in edges:
+            is_directed = True
+            break
+
+    return is_directed, has_self_loops
+
+
 def save_training_embeds(loader, model, output_path, device):
     output_img, output_txt = [], []
     for batch in loader:
@@ -26,21 +52,36 @@ def save_training_embeds(loader, model, output_path, device):
     np.save(os.path.join(output_path, 'texts_after_sheaf.npy'), text_output)
     
  
-def redirect_edge_index(original_edge_index, original_edge_attr, x):
+def redirect_edge_index(original_edge_index, original_edge_attr, x, orig_id=None):
     original_edge_index = torch.Tensor(original_edge_index).t().tolist()
     output_edge_index, output_edge_attr = [], []
-    for edge, attr in zip(original_edge_index, original_edge_attr):
-        if x[edge[0]].dim() > 1:
-            output_edge_index.append([edge[0], edge[1]])
-            output_edge_attr.append(attr)
-    return output_edge_index, output_edge_attr
+    if orig_id is not None:
+        output_orig_id = []
+        for edge, attr, org in zip(original_edge_index, original_edge_attr, orig_id):
+            if x[edge[0]].dim() > 1:
+                output_edge_index.append([edge[0], edge[1]])
+                output_edge_attr.append(attr)
+                output_orig_id.append(org)
+        return output_edge_index, output_edge_attr, output_orig_id
+        
+    else:
+    
+        for edge, attr in zip(original_edge_index, original_edge_attr):
+            if x[edge[0]].dim() > 1:
+                output_edge_index.append([edge[0], edge[1]])
+                output_edge_attr.append(attr)
+        
+        return output_edge_index, output_edge_attr
  
-def process_batch(batch, check_images_=False):
+def process_batch(batch, check_images_=False, split='train'):
     
-    
-    x, edge_index, edge_attr = batch.x, batch.edge_index, batch.edge_attr
-    
-    edge_index, edge_attr = redirect_edge_index(edge_index, edge_attr, x)
+    if split == 'predict':
+        x, edge_index, edge_attr, orig_id = batch.x, batch.edge_index, batch.edge_attr, batch.orig_id
+        edge_index, edge_attr, orig_id = redirect_edge_index(edge_index, edge_attr, x, orig_id)
+        orig_id = torch.LongTensor(orig_id) // 2
+    else:
+        x, edge_index, edge_attr = batch.x, batch.edge_index, batch.edge_attr
+        edge_index, edge_attr = redirect_edge_index(edge_index, edge_attr, x)
     
     device = x[0].device
     edge_index = torch.LongTensor(edge_index)#.t()
@@ -67,7 +108,11 @@ def process_batch(batch, check_images_=False):
 
     edge_index = edge_index.t()
     print(x_img.shape, x_text.shape)
-    return x_img, x_text, edge_index, edge_attr
+
+    if split == 'predict':
+        return x_img, x_text, edge_index, edge_attr, orig_id     
+    else:
+        return x_img, x_text, edge_index, edge_attr
 
 
 def check_images(x_img, x_text, edge_index):# write first image to file

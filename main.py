@@ -13,32 +13,6 @@ from src.data import *
 from src.model import *
 from src.utils import *
 
-
-def check_graph_properties(data):
-    """
-    Check if a PyTorch Geometric graph is directed and contains self loops.
-    data: PyTorch Geometric Data object
-    Returns: tuple (is_directed, has_self_loops)
-    """
-    # Controlla se il grafo ha self loops
-    # edge_index ha dimensione [2, num_edges]
-    edge_index = data.edge_index
-    has_self_loops = torch.any(edge_index[0] == edge_index[1]).item()
-
-    # Controlla se il grafo è diretto
-    # Crea un set di tuple di edges
-    edges = set(map(tuple, edge_index.t().tolist()))
-    
-    # Un grafo è non diretto se per ogni edge (u,v) esiste anche (v,u)
-    is_directed = False
-    for edge in edges:
-        if (edge[1], edge[0]) not in edges:
-            is_directed = True
-            break
-
-    return is_directed, has_self_loops
-
-
 def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_size:int=1, 
          base_folder: str = "../wikidata_arthist/", checkpoint_name=None):
     """
@@ -106,8 +80,6 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
                                 recursive=False, save_dir=None)
     val_loader = ClusterLoader(val_dataset, batch_size=1, shuffle=True)
 
-    
-    
       
     if checkpoint_name:
         os.makedirs('data/train_embeddings', exist_ok=True)

@@ -273,18 +273,21 @@ class SheafMultimodalGNN(pl.LightningModule):
         return out, edge_index
     
     def step(self, batch, batch_idx, split='train'):
-        
-        x_img, x_text, edge_index, edge_attr = process_batch(batch) # for some reason edge_idx[0] != edge_idx[1] 
+
+        if split == 'predict':
+            x_img, x_text, edge_index, edge_attr, orig_ids = process_batch(batch, split=split) 
+        else:
+            x_img, x_text, edge_index, edge_attr = process_batch(batch) # for some reason edge_idx[0] != edge_idx[1] 
         
         # Forward pass to get all embeddings
         embeddings, _ = self.forward(x_img, x_text, edge_index, edge_attr, split=split)
         img_emb = F.normalize(embeddings[: len(edge_attr), :], dim=1)
         txt_emb = F.normalize(embeddings[len(edge_attr):, :], dim=1)
         
-        print(f"Embeddings: {embeddings}")
         
         print(f"img emb: {img_emb.shape}, text emb: {txt_emb.shape}")
         sim_matrix = img_emb @ txt_emb.T
+        print(f"Embeddings: {embeddings[:5, :5]}")
         print("Similarity matrix (val):", sim_matrix[:5, :5])
 
         loss_clip = clip_loss(img_emb, txt_emb)
@@ -327,8 +330,40 @@ class SheafMultimodalGNN(pl.LightningModule):
                 self.log(f'{split}_rel_{fingerprint}_i2t_{name}', value, prog_bar=False, on_epoch=True, on_step=False)
             for name, value in rel_metrics_t2i.items():
                 self.log(f'{split}_rel_{fingerprint}_t2i_{name}', value, prog_bar=False, on_epoch=True, on_step=False)
-          
-        return loss, metrics_i2t, metrics_t2i, loss_clip
+
+        if split == 'predict':
+            return img_emb, txt_emb, orig_ids
+        else:
+            return loss, metrics_i2t, metrics_t2i, loss_clip
+    
+    def prediction(self, train_test_loader, N) -> dict:
+        """
+        Validation step to evaluate model performance on validation data.
+
+        Args:
+            batch (tuple): (node_features, edge_index, edge_attr, num_texts)
+            batch_idx (int): Index of the batch
+
+        Returns:
+            dict: Dictionary containing validation metrics
+        """
+        preds_img = torch.empty((N, 512))
+        preds_txt = torch.empty((N, 512))
+
+        with torch.no_grad():
+            for batch in train_test_loader:
+                batch = batch.to(self._device)
+                batch.x, batch.edge_index, batch.edge_attr = batch.x, batch.edge_index, batch.edge_attr
+                batch.orig_id = batch.edge_attr[:, -1]
+                batch.edge_attr = batch.edge_attr[:, :-1]
+                
+                img_emb, txt_emb, orig_ids = self.step(batch, 0, split='predict')
+                orig = orig_ids.cpu().numpy()
+                preds_img[orig] = img_emb.detach().cpu()
+                preds_txt[orig] = txt_emb.detach().cpu()
+    
+        
+        return preds_img, preds_txt
 
     def training_step(self, batch: tuple, batch_idx: int) -> torch.Tensor:
         """
@@ -372,6 +407,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         val_loss, metrics_i2t, metrics_t2i, _ = self.step(batch, batch_idx, split='val')
         return {'val_loss': val_loss, **{f'val_i2t_{k}': v for k, v in metrics_i2t.items()} , **{f'val_t2i_{k}': v for k, v in metrics_t2i.items()}}
 
+    
     def test_step(self, batch: tuple, batch_idx: int) -> dict:
         """
         Test step to evaluate model performance on test data.

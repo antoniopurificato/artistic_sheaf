@@ -3,17 +3,19 @@ import torch
 import pytorch_lightning as pl
 from torch_geometric.loader import DataLoader
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+from src.ClusterData import ClusterData, ClusterLoader
 
 from src.data import *
 from src.model import *
 import open_clip
-from src.utils import seed_everything, GraphEdgeDataset
+from src.utils import *
+from src.metrics import *
 
 
 def predict_test_scores(checkpoint_path: str,
-                        test_data_path: str,
+                        train_test_path: str,
                         base_folder: str = "../wikidata_arthist/",
-                        batch_size: int = 1,
+                        batch_size: int = 50,
                         seed: int = 42,
                         device: str = None):
     """
@@ -32,26 +34,33 @@ def predict_test_scores(checkpoint_path: str,
     
     
     #Load training embedding
-    train_embeddings_images = np.load('data/train_embeddings/image_embeds')
-    train_embeddings_texts = np.load('data/train_embeddings/text_embeds')
+    #train_embeddings_images = np.load('data/train_embeddings/image_embeds')
+    #train_embeddings_texts = np.load('data/train_embeddings/text_embeds')
+    #train_path = os.path.join('data/', "triplets_semart_train.json")
+
+    # mapper id --> embedding (with info saved)
+
+    # search tree con immagini
+    # un search tree per attr dei testi
+
+    # load embedding di test
+    # mapping id to embedding for test
+
+    # queries: 
+    # per ogni immagine cerca in tutti i tree di testo e salva triplets [img_src, which tree (attr), closest txt]
+    # per ogni testo (di cui sappiamo attribute) salva [closest_image, attr, txt_src]
+
     
-    train_path = os.path.join('data/', "triplets_semart_train.json")
+    # save json o pass dict
+    # tutto il json del train + le nuove triplets
+    # save key specifying whether comes from train or test
+    #train_test_path = '---'
+    
     # Training data
-    train_data_list = load_json_data(train_path)[:50000]
-    train_graph_data, train_node_to_id, train_edge_labels = build_graph_from_json(train_data_list, preprocess, tokenizer, base_folder=base_folder)
+    train_test_data_list = load_json_data(train_test_path)[:100]
+    train_test_graph_data, _, _ = build_graph_from_json(train_test_data_list, preprocess, tokenizer, base_folder=base_folder) 
     
-    # Load test data
-    test_data_list = load_json_data(test_path)#[:1000]
-    test_graph_data, test_node_to_id, test_edge_labels = build_graph_from_json(test_data_list, preprocess, tokenizer, base_folder=base_folder)
-    test_graph_data = test_graph_data
-    test_dataset = GraphEdgeDataset(test_graph_data)
-    test_loader = DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=False)
-
-    print("Loaded test data with {} nodes.".format(len(test_node_to_id.keys())))
-    
-    for test_node in test_graph_data.x:
                 
-
     # Initialize the model
     model = SheafMultimodalGNN(
         latent_dim=512,
@@ -67,38 +76,28 @@ def predict_test_scores(checkpoint_path: str,
     model.load_state_dict(checkpoint['state_dict'])
     model = model.to(device)
     model.eval()
-    
-    # Configure the trainer with GPU acceleration
-    trainer = pl.Trainer(
-        max_epochs=50,
-        accelerator='gpu' if torch.cuda.is_available() else 'mps',
-        devices=1, # Use 1 GPU if available
-        callbacks=[
-            EarlyStopping(monitor='val_loss', patience=5),
-            ModelCheckpoint(
-                monitor='val_loss',
-                dirpath='checkpoints',
-                filename='sheaf-gnn-{epoch:02d}-{val_loss:.2f}',
-                save_top_k=3
-            )
-        ]
-    )
-    
-    # Test the model
-    trainer.test(model, test_loader)
-    
-    #Attaccare alla parte più probabile del grafo di training
-        
-    #Carico il grafo di train
-    
-    plot_subgraph(test_graph_data.cpu(), test_node_to_id, 
-                raw_edge_labels=test_edge_labels, 
-                num_nodes=100,
-                save_path="figures/test_graph_trained.png")
 
+    print("Creating data loaders...")
+    train_test_graph_data.num_nodes = len(train_test_graph_data.x)
+    train_test_graph_data.orig_id = torch.arange(train_test_graph_data.edge_index.shape[1]) 
+    train_test_graph_data.edge_attr = torch.cat([train_test_graph_data.edge_attr, train_test_graph_data.orig_id.unsqueeze(1)], dim=1)
+    
+    print('Number of batches', len(train_test_data_list) // batch_size + 1)
+    train_test_dataset = ClusterData(train_test_graph_data, num_parts=len(train_test_data_list) // batch_size + 1, recursive=False, save_dir='data/clusters_test')
+    train_test_loader = ClusterLoader(train_test_dataset, batch_size=1, shuffle=False)
+    
+    predictions_img, predictions_txt = model.prediction(train_test_loader,  train_test_graph_data.edge_index.shape[1] // 2)  # metodo per avere l'ordine giusto
+    
+    # select only the test samples
+    metrics_i2t = compute_clip_metrics(predictions_img, predictions_txt)
+    metrics_t2i = compute_clip_metrics(predictions_txt, predictions_img)
+    print(metrics_i2t)
+    print()
+    print(metrics_t2i)
+    
     
     
 if __name__ == "__main__":
-    checkpoint = "checkpoints/sheaf-gnn-epoch=18-val_loss=3.03.ckpt"
-    test_path = "data/triplets_semart_test.json"
-    scores = predict_test_scores(checkpoint, test_path, seed=42, base_folder='../SemArt/')
+    checkpoint = "checkpoints/sheaf-gnn-epoch=test.ckpt"
+    test_path = "data/triplets_semart_test_csv.json"
+    scores = predict_test_scores(checkpoint, test_path, seed=42, base_folder='../')
