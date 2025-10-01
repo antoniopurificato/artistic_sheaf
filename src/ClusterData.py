@@ -394,4 +394,5 @@ class ClusterLoader(torch.utils.data.DataLoader):
                 continue
 
         out.edge_index = torch.stack([row, col], dim=0)
+        
         return out

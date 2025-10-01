@@ -30,11 +30,27 @@ def predict_test_scores(checkpoint_path: str,
     tokenizer = open_clip.get_tokenizer('ViT-B-32')
     _, _, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     
+    
+    #Load training embedding
+    train_embeddings_images = np.load('data/train_embeddings/image_embeds')
+    train_embeddings_texts = np.load('data/train_embeddings/text_embeds')
+    
+    train_path = os.path.join('data/', "triplets_semart_train.json")
+    # Training data
+    train_data_list = load_json_data(train_path)[:50000]
+    train_graph_data, train_node_to_id, train_edge_labels = build_graph_from_json(train_data_list, preprocess, tokenizer, base_folder=base_folder)
+    
     # Load test data
     test_data_list = load_json_data(test_path)#[:1000]
     test_graph_data, test_node_to_id, test_edge_labels = build_graph_from_json(test_data_list, preprocess, tokenizer, base_folder=base_folder)
-    test_graph_data = test_graph_data.to(device)
+    test_graph_data = test_graph_data
+    test_dataset = GraphEdgeDataset(test_graph_data)
+    test_loader = DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=False)
+
     print("Loaded test data with {} nodes.".format(len(test_node_to_id.keys())))
+    
+    for test_node in test_graph_data.x:
+                
 
     # Initialize the model
     model = SheafMultimodalGNN(
@@ -46,10 +62,6 @@ def predict_test_scores(checkpoint_path: str,
         device='cuda' if torch.cuda.is_available() else 'mps'
     )
     
-    print("Creating data loaders...")
-    test_dataset = GraphEdgeDataset(test_graph_data)
-    test_loader = DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=False)
-
     # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint['state_dict'])
@@ -74,6 +86,10 @@ def predict_test_scores(checkpoint_path: str,
     
     # Test the model
     trainer.test(model, test_loader)
+    
+    #Attaccare alla parte più probabile del grafo di training
+        
+    #Carico il grafo di train
     
     plot_subgraph(test_graph_data.cpu(), test_node_to_id, 
                 raw_edge_labels=test_edge_labels, 

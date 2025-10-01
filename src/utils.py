@@ -4,6 +4,7 @@ from typing import Tuple
 import open_clip
 from PIL import Image
 from torchvision import transforms
+import torch.nn.functional as F 
 import numpy as np
 import os
 
@@ -25,11 +26,26 @@ def save_training_embeds(loader, model, output_path, device):
     np.save(os.path.join(output_path, 'texts_after_sheaf.npy'), text_output)
     
  
+def redirect_edge_index(original_edge_index, original_edge_attr, x):
+    original_edge_index = torch.Tensor(original_edge_index).t().tolist()
+    output_edge_index, output_edge_attr = [], []
+    for edge, attr in zip(original_edge_index, original_edge_attr):
+        if x[edge[0]].dim() > 1:
+            output_edge_index.append([edge[0], edge[1]])
+            output_edge_attr.append(attr)
+    return output_edge_index, output_edge_attr
+ 
 def process_batch(batch, check_images_=False):
     
+    
     x, edge_index, edge_attr = batch.x, batch.edge_index, batch.edge_attr
+    
+    edge_index, edge_attr = redirect_edge_index(edge_index, edge_attr, x)
+    
     device = x[0].device
-    edge_index = torch.Tensor(edge_index).t()
+    edge_index = torch.LongTensor(edge_index)#.t()
+    
+    print(edge_index.shape)
     
     img_idxs = [i for i,xx in enumerate(x) if xx.dim() > 1]
     img_map = {j:i for i, j in enumerate(img_idxs)}
@@ -39,11 +55,12 @@ def process_batch(batch, check_images_=False):
     
     x_img = torch.cat([xx.unsqueeze(0) for i, xx in enumerate(x) if i in img_idxs], dim=0)
     x_text = torch.cat([xx.unsqueeze(0) for i, xx in enumerate(x) if i in txt_idxs], dim=0)
-
     
+    edge_attr = torch.cat([xx.unsqueeze(0) for i, xx in enumerate(edge_attr)], dim=0)
+
     # If you want to remap ALL sources/dests:
-    edge_index[:, 0] = torch.Tensor([img_map[int(x.detach())] for x in edge_index[:, 0]]).to(device)
-    edge_index[:, 1] = torch.Tensor([txt_map[int(x.detach())] for x in edge_index[:, 1]]).to(device)
+    edge_index[:, 0] = torch.LongTensor([img_map[int(x.detach())] for x in edge_index[:, 0]]).to(device)
+    edge_index[:, 1] = torch.LongTensor([txt_map[int(x.detach())] for x in edge_index[:, 1]]).to(device)
     
     if check_images_:
         check_images(x_img, x_text, edge_index)

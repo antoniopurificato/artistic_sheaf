@@ -14,6 +14,31 @@ from src.model import *
 from src.utils import *
 
 
+def check_graph_properties(data):
+    """
+    Check if a PyTorch Geometric graph is directed and contains self loops.
+    data: PyTorch Geometric Data object
+    Returns: tuple (is_directed, has_self_loops)
+    """
+    # Controlla se il grafo ha self loops
+    # edge_index ha dimensione [2, num_edges]
+    edge_index = data.edge_index
+    has_self_loops = torch.any(edge_index[0] == edge_index[1]).item()
+
+    # Controlla se il grafo è diretto
+    # Crea un set di tuple di edges
+    edges = set(map(tuple, edge_index.t().tolist()))
+    
+    # Un grafo è non diretto se per ogni edge (u,v) esiste anche (v,u)
+    is_directed = False
+    for edge in edges:
+        if (edge[1], edge[0]) not in edges:
+            is_directed = True
+            break
+
+    return is_directed, has_self_loops
+
+
 def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_size:int=1, 
          base_folder: str = "../wikidata_arthist/", checkpoint_name=None):
     """
@@ -32,13 +57,13 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     _,_, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     
     # Training data
-    train_data_list = load_json_data(train_path)[:50000]
+    train_data_list = load_json_data(train_path)
     train_graph_data, train_node_to_id, train_edge_labels = build_graph_from_json(train_data_list, preprocess, tokenizer, base_folder=base_folder)
     train_graph_data = train_graph_data #.to(device)
     print("Loaded training data with {} nodes.".format(len(train_node_to_id.keys())))
     
     # Validation data
-    val_data_list = load_json_data(val_path)[:5000]
+    val_data_list = load_json_data(val_path)
     val_graph_data, val_node_to_id, val_edge_labels = build_graph_from_json(val_data_list, preprocess, tokenizer, base_folder=base_folder)
     val_graph_data = val_graph_data #.to(device)
     print("Loaded val data with {} nodes.".format(len(val_node_to_id.keys())))
@@ -68,17 +93,22 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     print("Creating data loaders...")
     train_graph_data.num_nodes = len(train_graph_data.x)
     
+    print(check_graph_properties(train_graph_data))
+    
+    
     train_dataset = ClusterData(train_graph_data, num_parts=len(train_data_list) // batch_size + 1,
                                 recursive=False, save_dir='data/clusters')
     train_loader = ClusterLoader(train_dataset, batch_size=batch_size, shuffle=True)
-
+    
     val_graph_data.num_nodes = len(val_graph_data.x)
     
     val_dataset = ClusterData(val_graph_data, num_parts=len(val_data_list) // batch_size + 1,
                                 recursive=False, save_dir=None)
     val_loader = ClusterLoader(val_dataset, batch_size=batch_size, shuffle=True)
 
-         
+    
+    
+      
     if checkpoint_name:
         os.makedirs('data/train_embeddings', exist_ok=True)
         save_training_embeds(train_loader, model, 'data/train_embeddings',device=device)
@@ -121,5 +151,5 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
 
 if __name__ == "__main__":
     #main('data', plot_graph=True, batch_size=512, seed=42, base_folder='data/SemArt/')
-    main('data', plot_graph=True, batch_size=1024, seed=42, base_folder='../',
+    main('data', plot_graph=True, batch_size=512, seed=42, base_folder='data/SemArt/',
          checkpoint_name=None)
