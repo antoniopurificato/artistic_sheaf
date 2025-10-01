@@ -57,13 +57,13 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     _,_, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     
     # Training data
-    train_data_list = load_json_data(train_path)
+    train_data_list = load_json_data(train_path)#[:2000]
     train_graph_data, train_node_to_id, train_edge_labels = build_graph_from_json(train_data_list, preprocess, tokenizer, base_folder=base_folder)
     train_graph_data = train_graph_data #.to(device)
     print("Loaded training data with {} nodes.".format(len(train_node_to_id.keys())))
     
     # Validation data
-    val_data_list = load_json_data(val_path)
+    val_data_list = load_json_data(val_path)#[:500]
     val_graph_data, val_node_to_id, val_edge_labels = build_graph_from_json(val_data_list, preprocess, tokenizer, base_folder=base_folder)
     val_graph_data = val_graph_data #.to(device)
     print("Loaded val data with {} nodes.".format(len(val_node_to_id.keys())))
@@ -95,16 +95,16 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     
     print(check_graph_properties(train_graph_data))
     
-    
+    print('Number of batches', len(train_data_list) // batch_size + 1)
     train_dataset = ClusterData(train_graph_data, num_parts=len(train_data_list) // batch_size + 1,
                                 recursive=False, save_dir='data/clusters')
-    train_loader = ClusterLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    train_loader = ClusterLoader(train_dataset, batch_size=1, shuffle=True)
     
     val_graph_data.num_nodes = len(val_graph_data.x)
     
     val_dataset = ClusterData(val_graph_data, num_parts=len(val_data_list) // batch_size + 1,
                                 recursive=False, save_dir=None)
-    val_loader = ClusterLoader(val_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = ClusterLoader(val_dataset, batch_size=1, shuffle=True)
 
     
     
@@ -138,6 +138,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
   
     # For plotting, move data back to CPU
     if plot_graph:
+        os.makedirs('figures', exist_ok=True)
         plot_subgraph(train_graph_data.cpu(), train_node_to_id, 
                      raw_edge_labels=train_edge_labels, 
                      num_nodes=12,
@@ -151,5 +152,5 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
 
 if __name__ == "__main__":
     #main('data', plot_graph=True, batch_size=512, seed=42, base_folder='data/SemArt/')
-    main('data', plot_graph=True, batch_size=512, seed=42, base_folder='data/SemArt/',
+    main('data', plot_graph=True, batch_size=512, seed=42, base_folder='../',
          checkpoint_name=None)
