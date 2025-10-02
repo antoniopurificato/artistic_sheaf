@@ -93,10 +93,9 @@ def process_batch(batch, check_images_=False, split='train'):
     
     txt_idxs = [i for i,xx in enumerate(x) if xx.dim() == 1]
     txt_map = {j:i for i, j in enumerate(txt_idxs)}
-    
     x_img = torch.cat([xx.unsqueeze(0) for i, xx in enumerate(x) if i in img_idxs], dim=0)
     x_text = torch.cat([xx.unsqueeze(0) for i, xx in enumerate(x) if i in txt_idxs], dim=0)
-    
+    print(x_text.shape)
     edge_attr = torch.cat([xx.unsqueeze(0) for i, xx in enumerate(edge_attr)], dim=0)
 
     # If you want to remap ALL sources/dests:

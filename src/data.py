@@ -17,7 +17,7 @@ from tqdm import tqdm
 def get_clip_embedder(itm, preprocess, tokenizer, base_folder='../wikidata_arthist/'):
     
     with torch.no_grad():
-        if os.path.isfile(os.path.join(base_folder, itm)):
+        if os.path.isfile(os.path.join(base_folder, itm)) or 'Images/' in itm:
             try:
                 img = Image.open(os.path.join(base_folder, itm)).convert("RGB")  # force RGB
                 img.verify()  # check if corrupt
