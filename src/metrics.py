@@ -2,6 +2,7 @@ import torch
 from typing import Dict, List, Optional
 import torch.nn.functional as F
 import open_clip
+import numpy as np 
 
 def get_adjacency_matrix(edge_index):
     """
@@ -92,12 +93,12 @@ def get_top_k_recommendations(sim_matrix: torch.Tensor, k: int):
         List[List[int]]: A list containing the indices of the recommended items for each query
     """
     # Find the indices of the top-k items for each query by sorting the similarity matrix
-    print(sim_matrix.shape)
+    #print(sim_matrix.shape)
     _, top_k_indices = torch.topk(sim_matrix, k=k, dim=1)
 
     # Convert the indices to a list of lists
     recommended_items = top_k_indices.tolist()
-    print(len(recommended_items))
+    #print(len(recommended_items))
 
     return recommended_items
 
@@ -325,9 +326,9 @@ def compute_relation_aware_metrics(
     text_mask = torch.tensor([t == 'text' for t in node_types], device=embeddings.device)
     image_mask = torch.tensor([t == 'image' for t in node_types], device=embeddings.device)
     
-    print(f"Number of text nodes: {text_mask.sum().item()}")
-    print(f"Number of image nodes: {image_mask.sum().item()}")
-    print(f"Similarity matrix stats: min={sim_matrix.min().item()}, max={sim_matrix.max().item()}, mean={sim_matrix.mean().item()}")
+    #print(f"Number of text nodes: {text_mask.sum().item()}")
+    #print(f"Number of image nodes: {image_mask.sum().item()}")
+    #print(f"Similarity matrix stats: min={sim_matrix.min().item()}, max={sim_matrix.max().item()}, mean={sim_matrix.mean().item()}")
     
     # Convert edge_attr to float
     edge_attr = edge_attr.float()
@@ -454,3 +455,74 @@ def compute_relation_aware_metrics(
         metrics_by_relation[f"relation_{name}"] = metrics
             
     return metrics_by_relation
+
+
+## functions
+
+def get_sim_matrix(image_names, text_names, image_embeddings, text_embeddings, img_to_idx, txt_to_idx):
+    """
+    Compute similarity matrix between image and text embeddings.
+    """
+    img_to_emb = {name: emb for name, emb in zip(image_names, image_embeddings)}
+    txt_to_emb = {name: emb for name, emb in zip(text_names, text_embeddings)} #.squeeze(0)
+    
+    idx_to_img = {v: k for k, v in img_to_idx.items()}
+    idx_to_txt = {v: k for k, v in txt_to_idx.items()}
+    
+    # 4. Reorder embeddings according to adjacency order
+    reordered_img_emb = np.array([img_to_emb[idx_to_img[i]] for i in range(len(img_to_idx))])
+    reordered_txt_emb = np.array([txt_to_emb[idx_to_txt[j]] for j in range(len(txt_to_idx))])
+    
+    # 5. Normalize and compute cosine similarity
+    reordered_img_emb /= np.linalg.norm(reordered_img_emb, axis=1, keepdims=True)
+    #print(f"Reordered image embeddings shape: {reordered_img_emb.shape}")
+    reordered_txt_emb /= np.linalg.norm(reordered_txt_emb, axis=1, keepdims=True)
+    #print(f"Reordered text embeddings shape: {reordered_txt_emb.shape}")
+    sim_matrix = reordered_img_emb @ reordered_txt_emb.T
+    return sim_matrix
+
+
+def make_adj_matrix(triplets, field='item2'):
+    """
+    """
+    # Separate unique images (item1) and texts (item2)
+    images = sorted({t["item1"] for t in triplets})
+    texts = sorted({t[field] for t in triplets})
+
+    # Create mapping
+    img_to_idx = {img: i for i, img in enumerate(images)}
+    txt_to_idx = {txt: j for j, txt in enumerate(texts)}
+
+    # Initialize adjacency matrix
+    adj_matrix = np.zeros((len(images), len(texts)), dtype=int)
+
+    # Fill matrix
+    for t in triplets:
+        i = img_to_idx[t["item1"]]
+        j = txt_to_idx[t[field]]
+        adj_matrix[i, j] = 1
+
+    return adj_matrix, img_to_idx, txt_to_idx
+
+def compute_image_to_text_accuracy(sim_matrix: np.ndarray, adj_matrix: np.ndarray) -> float:
+    """
+    Computes the accuracy of retrieving the correct text for each image
+    based on the similarity matrix.
+
+    Args:
+        sim_matrix (np.ndarray): [num_images, num_texts] similarity matrix.
+        adj_matrix (np.ndarray): [num_images, num_texts] adjacency matrix 
+                                 where 1 indicates the correct match.
+
+    Returns:
+        float: Accuracy (in range [0, 1])
+    """
+    # Get the text index with the highest similarity for each image
+    top_text_indices = np.argmax(sim_matrix, axis=1)  # [num_images]
+
+    # Check if the top prediction is correct
+    correct = adj_matrix[np.arange(sim_matrix.shape[0]), top_text_indices]
+
+    # Compute accuracy
+    accuracy = correct.mean()
+    return float(accuracy)

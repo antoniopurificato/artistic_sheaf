@@ -8,111 +8,138 @@ import torch.nn.functional as F
 import numpy as np
 import os
 
-
-def check_graph_properties(data):
-    """
-    Check if a PyTorch Geometric graph is directed and contains self loops.
-    data: PyTorch Geometric Data object
-    Returns: tuple (is_directed, has_self_loops)
-    """
-    # Controlla se il grafo ha self loops
-    # edge_index ha dimensione [2, num_edges]
-    edge_index = data.edge_index
-    has_self_loops = torch.any(edge_index[0] == edge_index[1]).item()
-
-    # Controlla se il grafo è diretto
-    # Crea un set di tuple di edges
-    edges = set(map(tuple, edge_index.t().tolist()))
-    
-    # Un grafo è non diretto se per ogni edge (u,v) esiste anche (v,u)
-    is_directed = False
-    for edge in edges:
-        if (edge[1], edge[0]) not in edges:
-            is_directed = True
-            break
-
-    return is_directed, has_self_loops
-
-
-def save_training_embeds(loader, model, output_path, device):
-    output_img, output_txt = [], []
-    for batch in loader:
-        batch = batch.to(device)
-        x_img, x_text, edge_index, edge_attr = process_batch(batch, split='sheaf') # for some reason edge_idx[0] != edge_idx[1]
-
-        embeddings, _, edge_loss = model(x_img, x_text, edge_index, edge_attr, split='train')
-        img_emb = F.normalize(embeddings[: len(edge_attr), :], dim=1)
-        txt_emb = F.normalize(embeddings[len(edge_attr):, :], dim=1)
-        output_img.append(img_emb)
-        output_txt.append(txt_emb)
-    
-    image_output = torch.cat(output_img, dim=0).cpu().detach().numpy().astype(np.float16)  # store as fp16
-    text_output = torch.cat(output_txt, dim=0).cpu().detach().numpy().astype(np.float16)  # store as fp16
-    np.save(os.path.join(output_path, 'images_after_sheaf.npy'), image_output)
-    np.save(os.path.join(output_path, 'texts_after_sheaf.npy'), text_output)
-    
- 
-def redirect_edge_index(original_edge_index, original_edge_attr, x, orig_id=None):
-    original_edge_index = torch.Tensor(original_edge_index).t().tolist()
-    output_edge_index, output_edge_attr = [], []
-    if orig_id is not None:
-        output_orig_id = []
-        for edge, attr, org in zip(original_edge_index, original_edge_attr, orig_id):
-            if x[edge[0]].dim() > 1:
-                output_edge_index.append([edge[0], edge[1]])
-                output_edge_attr.append(attr)
-                output_orig_id.append(org)
-        return output_edge_index, output_edge_attr, output_orig_id
-        
-    else:
-    
-        for edge, attr in zip(original_edge_index, original_edge_attr):
-            if x[edge[0]].dim() > 1:
-                output_edge_index.append([edge[0], edge[1]])
-                output_edge_attr.append(attr)
-        
-        return output_edge_index, output_edge_attr
- 
-def process_batch(batch, check_images_=False, split='train'):
-    
-    if split == 'predict':
-        x, edge_index, edge_attr, orig_id = batch.x, batch.edge_index, batch.edge_attr, batch.orig_id
-        edge_index, edge_attr, orig_id = redirect_edge_index(edge_index, edge_attr, x, orig_id)
-        orig_id = torch.LongTensor(orig_id) // 2
-    else:
-        x, edge_index, edge_attr = batch.x, batch.edge_index, batch.edge_attr
-        edge_index, edge_attr = redirect_edge_index(edge_index, edge_attr, x)
-    
-    device = x[0].device
-    edge_index = torch.LongTensor(edge_index)#.t()
-    
-    print(edge_index.shape)
-    
-    img_idxs = [i for i,xx in enumerate(x) if xx.dim() > 1]
-    img_map = {j:i for i, j in enumerate(img_idxs)}
-    
-    txt_idxs = [i for i,xx in enumerate(x) if xx.dim() == 1]
-    txt_map = {j:i for i, j in enumerate(txt_idxs)}
-    x_img = torch.cat([xx.unsqueeze(0) for i, xx in enumerate(x) if i in img_idxs], dim=0)
-    x_text = torch.cat([xx.unsqueeze(0) for i, xx in enumerate(x) if i in txt_idxs], dim=0)
-    print(x_text.shape)
-    edge_attr = torch.cat([xx.unsqueeze(0) for i, xx in enumerate(edge_attr)], dim=0)
-
-    # If you want to remap ALL sources/dests:
-    edge_index[:, 0] = torch.LongTensor([img_map[int(x.detach())] for x in edge_index[:, 0]]).to(device)
-    edge_index[:, 1] = torch.LongTensor([txt_map[int(x.detach())] for x in edge_index[:, 1]]).to(device)
-    
-    if check_images_:
-        check_images(x_img, x_text, edge_index)
-
-    edge_index = edge_index.t()
-    print(x_img.shape, x_text.shape)
-
-    if split == 'predict':
-        return x_img, x_text, edge_index, edge_attr, orig_id     
-    else:
+def process_batch(batch, check_images_=False, split='sheaf'):
+    if split == 'sheaf':
+        x_img, x_text, edge_index, edge_attr = batch  # Unpack the batch
+        x_img, x_text, edge_index, edge_attr = reindex_and_deduplicate(x_img, x_text, edge_index, edge_attr)
+        if check_images_:
+            check_images(x_img, x_text, edge_index)
+        edge_index = edge_index.t()
         return x_img, x_text, edge_index, edge_attr
+    
+    else:    
+        if split == 'predict':
+            x, edge_index, edge_attr, orig_id = batch.x, batch.edge_index, batch.edge_attr, batch.orig_id
+            edge_index, edge_attr, orig_id = redirect_edge_index(edge_index, edge_attr, x, orig_id)
+            orig_id = torch.LongTensor(orig_id) // 2
+        else:
+            x, edge_index, edge_attr = batch.x, batch.edge_index, batch.edge_attr
+            edge_index, edge_attr = redirect_edge_index(edge_index, edge_attr, x)
+        
+        device = x[0].device
+        edge_index = torch.LongTensor(edge_index)#.t()
+        
+        #print(edge_index.shape)
+        
+        img_idxs = [i for i,xx in enumerate(x) if xx.dim() > 1]
+        img_map = {j:i for i, j in enumerate(img_idxs)}
+        
+        txt_idxs = [i for i,xx in enumerate(x) if xx.dim() == 1]
+        txt_map = {j:i for i, j in enumerate(txt_idxs)}
+        x_img = torch.cat([xx.unsqueeze(0) for i, xx in enumerate(x) if i in img_idxs], dim=0)
+        x_text = torch.cat([xx.unsqueeze(0) for i, xx in enumerate(x) if i in txt_idxs], dim=0)
+        edge_attr = torch.cat([xx.unsqueeze(0) for i, xx in enumerate(edge_attr)], dim=0)
 
+        # If you want to remap ALL sources/dests:
+        edge_index[:, 0] = torch.LongTensor([img_map[int(x.detach())] for x in edge_index[:, 0]]).to(device)
+        edge_index[:, 1] = torch.LongTensor([txt_map[int(x.detach())] for x in edge_index[:, 1]]).to(device)
+        
+        if check_images_:
+            check_images(x_img, x_text, edge_index)
+
+        edge_index = edge_index.t()
+        #print(x_img.shape, x_text.shape)
+
+        if split == 'predict':
+            return x_img, x_text, edge_index, edge_attr, orig_id     
+        else:
+            return x_img, x_text, edge_index, edge_attr
+
+def reindex_and_deduplicate(x_img, x_text, edge_index, edge_attr):
+    """
+    Reindex edge_index and deduplicate x_img and x_text
+    
+    Args:
+        x_img: tensor of shape (200, 3, 224, 224)
+        x_text: tensor of shape (200, 77) 
+        edge_index: tensor of shape (200, 2)  # Note: changed from (2, 200)
+        edge_attr: tensor of shape (200, num_edge_features)
+
+    Returns:
+        x_img_dedup: deduplicated images
+        x_text_dedup: deduplicated texts
+        edge_index_new: reindexed edge_index with 0-based indices
+        edge_attr_dedup: edge attributes (same as input since all edges are kept)
+    """
+    
+    # Get unique IDs from edge_index
+    unique_img_ids = torch.unique(edge_index[:, 0])
+    unique_text_ids = torch.unique(edge_index[:, 1])
+    
+    # Create mapping from old IDs to positions in original arrays
+    img_id_to_pos = {}
+    text_id_to_pos = {}
+    
+    # Find the first occurrence of each unique ID to map to original positions
+    for i, (img_id, text_id) in enumerate(edge_index):
+        img_id_item = img_id.item()
+        text_id_item = text_id.item()
+        
+        if img_id_item not in img_id_to_pos:
+            img_id_to_pos[img_id_item] = i
+        if text_id_item not in text_id_to_pos:
+            text_id_to_pos[text_id_item] = i
+    
+    # Extract unique images and texts based on the mapping
+    unique_img_positions = [img_id_to_pos[uid.item()] for uid in unique_img_ids]
+    unique_text_positions = [text_id_to_pos[uid.item()] for uid in unique_text_ids]
+    
+    x_img_dedup = x_img[unique_img_positions]
+    x_text_dedup = x_text[unique_text_positions]
+    
+    # Create mapping from old IDs to new sequential indices
+    img_id_to_new_idx = {uid.item(): i for i, uid in enumerate(unique_img_ids)}
+    text_id_to_new_idx = {uid.item(): i for i, uid in enumerate(unique_text_ids)}
+    
+    # Update edge_index with new indices
+    edge_index_new = torch.zeros_like(edge_index)
+    for i in range(edge_index.shape[0]):
+        old_img_id = edge_index[i, 0].item()
+        old_text_id = edge_index[i, 1].item()
+        
+        edge_index_new[i, 0] = img_id_to_new_idx[old_img_id]
+        edge_index_new[i, 1] = text_id_to_new_idx[old_text_id]
+    
+    # Edge attributes remain the same since we keep all edges
+    edge_attr_dedup = edge_attr
+    
+    return x_img_dedup, x_text_dedup, edge_index_new, edge_attr_dedup
+
+class GraphEdgeDataset(torch.utils.data.Dataset):
+    def __init__(self, graph_data: Data, device):
+        self.edge_indices = graph_data.edge_index.t()
+        self.edge_attrs = graph_data.edge_attr
+        self.x = graph_data.x
+        self.device = device
+        
+    def __len__(self):
+        return len(self.edge_indices)
+    
+    def __getitem__(self, idx):
+        
+        edge = self.edge_indices[idx]
+        edge_attr = self.edge_attrs[idx]
+        nodes = torch.unique(edge)
+        batch_x = [self.x[int(n)] for n in nodes]
+        batch_img = torch.stack([x for x in batch_x if isinstance(x, torch.Tensor) and x.dim() == 3], dim=0).squeeze(0).to(torch.float32).to(self.device)  # Add batch dimension
+        
+        if not torch.isfinite(batch_img).all():
+            print("⚠️ Non-finite values in image", idx)
+            batch_img = torch.nan_to_num(batch_img, nan=0.0, posinf=1.0, neginf=0.0)
+        
+        batch_text = torch.stack([x for x in batch_x if isinstance(x, torch.Tensor) and x.dim() == 1], dim=0).squeeze(0).to(torch.long).to(self.device)  # Add batch dimension
+
+        return batch_img, batch_text, edge, edge_attr
 
 def check_images(x_img, x_text, edge_index):# write first image to file
     for idx in range(10):
@@ -123,8 +150,7 @@ def check_images(x_img, x_text, edge_index):# write first image to file
         tokenizer = open_clip.get_tokenizer('ViT-B-32')
         text = tokenizer.decode(x_text[j].cpu().numpy())
         os.makedirs('test_images', exist_ok=True)
-        img.save(f"test_images/{text.replace('!', '').replace('/', '').replace('<start_of_text>', '').replace('<end_of_text>', '').replace(' ', '_')}_image.png")    
-
+        img.save(f"test_images/{text.replace('!', '').replace('/', '').replace('<start_of_text>', '').replace('<end_of_text>', '').replace(' ', '_')[:30]}_image.png")    
 
 def decode_clip_image(tensor_image):
     """
@@ -149,6 +175,26 @@ def decode_clip_image(tensor_image):
     to_pil = transforms.ToPILImage()
     return to_pil(img)
 
+def redirect_edge_index(original_edge_index, original_edge_attr, x, orig_id=None):
+    original_edge_index = torch.Tensor(original_edge_index).t().tolist()
+    output_edge_index, output_edge_attr = [], []
+    if orig_id is not None:
+        output_orig_id = []
+        for edge, attr, org in zip(original_edge_index, original_edge_attr, orig_id):
+            if x[edge[0]].dim() > 1:
+                output_edge_index.append([edge[0], edge[1]])
+                output_edge_attr.append(attr)
+                output_orig_id.append(org)
+        return output_edge_index, output_edge_attr, output_orig_id
+        
+    else:
+    
+        for edge, attr in zip(original_edge_index, original_edge_attr):
+            if x[edge[0]].dim() > 1:
+                output_edge_index.append([edge[0], edge[1]])
+                output_edge_attr.append(attr)
+        
+        return output_edge_index, output_edge_attr
 
 def seed_everything(seed: int = 42) -> None:
     """
@@ -167,7 +213,6 @@ def seed_everything(seed: int = 42) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
       
-
 def log_verbose(model, loss_clip, layer_prefixes=None):
     """
     Logs:
@@ -210,5 +255,27 @@ def log_verbose(model, loss_clip, layer_prefixes=None):
                     count += 1
             if count > 0:
                 print(f"Grad norm | Group [{group_name:<12}] = {(tot_sq ** 0.5):.6f}")
+              
+def check_graph_properties(data):
+    """
+    Check if a PyTorch Geometric graph is directed and contains self loops.
+    data: PyTorch Geometric Data object
+    Returns: tuple (is_directed, has_self_loops)
+    """
+    # Controlla se il grafo ha self loops
+    # edge_index ha dimensione [2, num_edges]
+    edge_index = data.edge_index
+    has_self_loops = torch.any(edge_index[0] == edge_index[1]).item()
 
-                  
+    # Controlla se il grafo è diretto
+    # Crea un set di tuple di edges
+    edges = set(map(tuple, edge_index.t().tolist()))
+    
+    # Un grafo è non diretto se per ogni edge (u,v) esiste anche (v,u)
+    is_directed = False
+    for edge in edges:
+        if (edge[1], edge[0]) not in edges:
+            is_directed = True
+            break
+
+    return is_directed, has_self_loops

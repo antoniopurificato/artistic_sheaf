@@ -54,6 +54,7 @@ class SheafConvLayer(nn.Module):
         """
         edge_inputs = torch.cat([x_row.to(self.device), x_col.to(self.device), edge_attr.to(self.device)], dim=1)
         maps = self.sheaf_learner(edge_inputs)  # Output a scalar map per edge
+        print('Checking maps', maps[:5])
         return maps
     
     def build_laplacian(self, maps: torch.Tensor) -> torch.Tensor:
@@ -105,7 +106,7 @@ class SheafConvLayer(nn.Module):
         Returns:
             Tensor: Updated node features [num_nodes, latent_dim]
         """
-        #device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
         
         # expanding to duplicated vals
         x_img_ext = x_img[self.edge_index[0]]
@@ -118,7 +119,7 @@ class SheafConvLayer(nn.Module):
         laplacian = self.build_laplacian(maps)
         
         y = self.linear(x)
-        x = x - self.step_size * torch.sparse.mm(laplacian, y.to(self.device)).to(y.device)
+        x = x - self.step_size * torch.sparse.mm(laplacian, y.to(device_2)).to(y.device)
         
         assert not torch.isnan(x).any(), "NaNs in input to conv"
         assert not torch.isnan(maps).any(), "NaNs in maps"
@@ -285,7 +286,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         txt_emb = F.normalize(embeddings[len(edge_attr):, :], dim=1)
         
         
-        print(f"img emb: {img_emb.shape}, text emb: {txt_emb.shape}")
+        #print(f"img emb: {img_emb.shape}, text emb: {txt_emb.shape}")
         sim_matrix = img_emb @ txt_emb.T
         print(f"Embeddings: {embeddings[:5, :5]}")
         print("Similarity matrix (val):", sim_matrix[:5, :5])
@@ -305,8 +306,9 @@ class SheafMultimodalGNN(pl.LightningModule):
             self.log(f'{split}_t2i_{name}', value, prog_bar=True, on_epoch=True, on_step=False,)
     
         
+        device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
         # Relation-aware metrics
-        unique_rels = torch.unique(edge_attr, dim=0)
+        unique_rels = torch.unique(edge_attr.to(device_2), dim=0).to(edge_attr.device)
 
         for rel in unique_rels:
             rel_mask = (edge_attr == rel).all(axis=1)
@@ -347,11 +349,12 @@ class SheafMultimodalGNN(pl.LightningModule):
         Returns:
             dict: Dictionary containing validation metrics
         """
+        from tqdm import tqdm
         preds_img = torch.empty((N, 512))
         preds_txt = torch.empty((N, 512))
 
         with torch.no_grad():
-            for batch in train_test_loader:
+            for batch in tqdm(train_test_loader, desc="Predicting"):
                 batch = batch.to(self._device)
                 batch.x, batch.edge_index, batch.edge_attr = batch.x, batch.edge_index, batch.edge_attr
                 batch.orig_id = batch.edge_attr[:, -1]

@@ -55,7 +55,8 @@ def build_graph_from_json(
     preprocess,
     tokenizer,
     base_folder,
-    item2 = 'item2'
+    item2 = 'item2',
+    split = 'normal'
 ) -> Tuple[Data, Dict[str, int], List[str], List[str]]:
     """
     Builds a PyTorch Geometric graph from the JSON input.
@@ -98,7 +99,8 @@ def build_graph_from_json(
         src = node_to_id[str(item.get('item1', ''))]
         dst = node_to_id[str(item.get(item2, ''))]
         edge_index_list.append([src, dst])
-        edge_index_list.append([dst, src])
+        if split == 'cluster':  # add reverse edge only in training
+            edge_index_list.append([dst, src])
 
         # Process edge feature: 'link'
         link_text = str(item.get('link', ''))
@@ -107,7 +109,8 @@ def build_graph_from_json(
         try:
             link_embedding = get_clip_embedder(link_text, preprocess, tokenizer, base_folder)
             edge_features.append(link_embedding.squeeze(0))
-            edge_features.append(link_embedding.squeeze(0))
+            if split == 'cluster':
+                edge_features.append(link_embedding.squeeze(0))
             
         except Exception as e:
             print(f"[Warning] Failed to embed link '{link_text}': {e}")
