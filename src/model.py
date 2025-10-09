@@ -69,19 +69,22 @@ class SheafConvLayer(nn.Module):
         """
         device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
         row, col = self.edge_index.to(device_2)
-        maps = maps.to(device_2)
+        row_ext = torch.cat([row, col], dim=0)
+        col_ext = torch.cat([col, row], dim=0)
         
+        maps = maps.to(device_2)
+        print(row_ext.shape, col_ext.shape, maps.shape)
         # Off-diagonal entries are negative product of opposite maps
         non_diag = maps**2 #-left_maps * right_maps  # [num_edges, 1]
 
         # Diagonal entries are sum of squared maps
         diag = torch.zeros(self.num_nodes, device=device_2)
-        diag.index_add_(0, row, (maps.squeeze() ** 2))  # Accumulate per node
+        diag.index_add_(0, row_ext, (maps.squeeze() ** 2))  # Accumulate per node
 
         # Normalize Laplacian
         d_sqrt_inv = (diag + 1).pow(-0.5)  # add 1 for numerical stability
-        left_norm = d_sqrt_inv[row]
-        right_norm = d_sqrt_inv[col]
+        left_norm = d_sqrt_inv[row_ext]
+        right_norm = d_sqrt_inv[col_ext]
         norm_maps = left_norm * non_diag.squeeze() * right_norm
         diag_norm = d_sqrt_inv * diag * d_sqrt_inv
 
@@ -89,7 +92,7 @@ class SheafConvLayer(nn.Module):
         diag_idx = torch.arange(self.num_nodes, device=device_2)
         indices = torch.cat([
             torch.stack([diag_idx, diag_idx], dim=0),
-            torch.stack([row, col], dim=0)
+            torch.stack([row_ext, col_ext], dim=0)
         ], dim=1)
         values = torch.cat([diag_norm, norm_maps])
         laplacian = torch.sparse_coo_tensor(indices, values, (self.num_nodes, self.num_nodes))
@@ -112,7 +115,11 @@ class SheafConvLayer(nn.Module):
         x_img_ext = x_img[self.edge_index[0]]
         x_txt_ext = x_txt[self.edge_index[1]]
         
-        maps = self.predict_restriction_maps(x_img_ext, x_txt_ext, edge_attr)
+        x_ext_0, x_ext_1 = torch.cat([x_img_ext, x_txt_ext], dim=0), torch.cat([x_txt_ext, x_img_ext], dim=0)
+        edge_attr = torch.cat([edge_attr, edge_attr], dim=0)
+
+        maps = self.predict_restriction_maps(x_ext_0, x_ext_1, edge_attr)
+        
         x = torch.cat([x_img, x_txt], dim=0)
         self.num_img_nodes = len(x_img)
         
@@ -137,7 +144,8 @@ class SheafMultimodalGNN(pl.LightningModule):
         device: str = 'cpu',
         w_clip: float = 1.0,
         w_edge_bce: float = 0,#1.0
-        clip_grad=False
+        clip_grad=False,
+        test=False,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -146,7 +154,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         self.step_size = step_size
         self.lr = lr
         self._device = device
-
+        self.test = test
         self.num_nodes = None
         
         self.w_clip = w_clip
@@ -210,7 +218,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         
     def modify_output(self, input_data, maps):
         if self.operation == 'sum':
-            output = input_data + maps
+            output = input_data + maps[:input_data.shape[0]]
         elif self.operation == 'product':
             output = input_data * maps
         elif self.operation == 'concat':
@@ -249,21 +257,26 @@ class SheafMultimodalGNN(pl.LightningModule):
         assert not torch.isnan(t_img).any(), "NaNs after input_proj"
         assert not torch.isnan(t_text).any(), "NaNs after input_proj"
 
-        h_list = []
-        all_maps = []
-        for i, conv in enumerate(self.convs):
-            conv.set_graph(edge_index, self.num_nodes)
-            h, maps = conv(t_img, t_txt, edge_attr, split=split)
-            h_list.append(h)
-            all_maps.append(maps)
+        if not self.test:
+            h_list = []
+            all_maps = []
+            for i, conv in enumerate(self.convs):
+                conv.set_graph(edge_index, self.num_nodes)
+                h, maps = conv(t_img, t_txt, edge_attr, split=split)
+                h_list.append(h)
+                all_maps.append(maps)
+                
+            out_maps = torch.stack(all_maps, dim=0).mean(dim=0)
+            out = torch.stack(h_list, dim=0).mean(dim=0)
             
-        out_maps = torch.stack(all_maps, dim=0).mean(dim=0)
-        out = torch.stack(h_list, dim=0).mean(dim=0)
+            assert not torch.isnan(out).any(), "NaNs in out before expansion"
+            
+            img_out = self.modify_output(out[:len(t_img)][edge_index[0]], out_maps)
+            txt_out = self.modify_output(out[len(t_img):][edge_index[1]],out_maps)
         
-        assert not torch.isnan(out).any(), "NaNs in out before expansion"
-        
-        img_out = self.modify_output(out[:len(t_img)][edge_index[0]], out_maps)
-        txt_out = self.modify_output(out[len(t_img):][edge_index[1]],out_maps)
+        else:
+            img_out = self.modify_output(t_img[edge_index[0]], edge_attr)
+            txt_out = self.modify_output(t_txt[edge_index[1]], edge_attr)
         
         out = torch.cat([img_out, txt_out], dim=0)
         assert not torch.isnan(out).any(), "NaNs in out after duplication"
