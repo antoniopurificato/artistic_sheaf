@@ -45,6 +45,7 @@ def parse_args():
     p.add_argument("--out_dir", type=str, required=False, help="Output directory for .npy and manifest.csv", default='data/train_embeddings')
     p.add_argument("--batch_size", type=int, default=512, help="Batch size for encoding")
     p.add_argument("--device", type=str, default=None, help="torch device, e.g., cuda, cuda:0, mps, or cpu. Default: auto")
+    p.add_argument("--finetuned", action="store_true", help="Use finetuned model.", default=False)
     p.add_argument("--no_images", action="store_true", help="Skip image embedding (only texts).", default=False)
     p.add_argument("--normalize", action="store_true", help="L2-normalize embeddings (recommended).", default=True)
     p.add_argument("--model", type=str, default="ViT-B-32", help="OpenCLIP model name")
@@ -153,10 +154,16 @@ def main():
     print(f"Using device: {device}")
 
     print(f"Loading model: {args.model} ({args.pretrained})")
-    model, _, preprocess = open_clip.create_model_and_transforms(args.model, pretrained=args.pretrained, device=device)
+    model, _, preprocess = open_clip.create_model_and_transforms(args.model, pretrained=args.pretrained)
+    if args.finetuned:
+        # Load finetuned weights from local path
+        model.load_state_dict(torch.load('/Users/ludovicaschaerf/Desktop/Sheaf_Art/notebooks/checkpoints/epoch_30.pt', map_location='cpu')["state_dict"])
+        print("Loaded finetuned weights.")
+        
+    model = model.to(device)
     tokenizer = open_clip.get_tokenizer(args.model)
 
-    data = load_dataset(f'data/{args.json}')
+    data = load_dataset(f'{args.json}')
     texts = [str(rec["item2"]) for rec in data]
     image_paths = build_image_paths(data, args.image_root)
 

@@ -31,13 +31,13 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     _,_, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     
     # Training data
-    train_data_list = load_json_data(train_path)[:5000]
+    train_data_list = load_json_data(train_path)#[:5000]
     train_graph_data, train_node_to_id, train_edge_labels = build_graph_from_json(train_data_list, preprocess, tokenizer, base_folder=base_folder)
     train_graph_data = train_graph_data.to(device)
     print("Loaded training data with {} nodes.".format(len(train_node_to_id.keys())))
     
     # Validation data
-    val_data_list = load_json_data(val_path)[:1000]
+    val_data_list = load_json_data(val_path)#[:1000]
     val_graph_data, val_node_to_id, val_edge_labels = build_graph_from_json(val_data_list, preprocess, tokenizer, base_folder=base_folder)
     val_graph_data = val_graph_data.to(device)
     print("Loaded val data with {} nodes.".format(len(val_node_to_id.keys())))
@@ -55,7 +55,8 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
         num_layers=3,
         step_size=1.0,
         lr=1e-4,
-        device=device
+        device=device,
+        verbose=False,
     )
     
     if checkpoint_name:
