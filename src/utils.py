@@ -8,6 +8,23 @@ import torch.nn.functional as F
 import numpy as np
 import os
 
+def str2bool(v):
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            if v.lower() in ('yes', 'true', 't', 'y', '1'):
+                return True
+            elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+                return False
+        print("the parser sees: ", v)
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+    
+def obtain_configuration(wandb_config, default_config):
+    wandb_dict = vars(wandb_config)
+    default_dict = vars(default_config)
+    return {param: wandb_dict.get(param, default_dict[param]) 
+            for param in default_dict.keys()}
+    
 def process_batch(batch, check_images_=False, split='sheaf'):
     if split == 'sheaf':
         x_img, x_text, edge_index, edge_attr = batch  # Unpack the batch
