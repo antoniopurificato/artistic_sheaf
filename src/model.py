@@ -120,6 +120,14 @@ class SheafConvLayer(nn.Module):
         x_ext_0, x_ext_1 = torch.cat([x_img_ext, x_txt_ext], dim=0), torch.cat([x_txt_ext, x_img_ext], dim=0)
         edge_attr = torch.cat([edge_attr, edge_attr], dim=0)
 
+        alignment_0 = alignment(x_ext_0, x_ext_1)
+    
+        uniformity_0 = uniformity(x_ext_0)
+        uniformity_1 = uniformity(x_ext_1)
+        
+        print(f"Alignemnt: {alignment_0}")
+        print(f"Uniformity: {uniformity_0}, {uniformity_1}")
+
         maps = self.predict_restriction_maps(x_ext_0, x_ext_1, edge_attr)
         
         x = torch.cat([x_img, x_txt], dim=0)
