@@ -9,6 +9,9 @@ from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 import open_clip
 import yaml
 import wandb
+from pytorch_lightning.loggers import WandbLogger
+
+
 
 from src.data import *
 from src.model import *
@@ -103,6 +106,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
                 save_top_k=3
             )
         ],
+        logger=True if not args.sweep else WandbLogger(project="artistic_sheaf", entity='sapienza_am'),
         gradient_clip_val=1.0, gradient_clip_algorithm="norm"
     )
     
