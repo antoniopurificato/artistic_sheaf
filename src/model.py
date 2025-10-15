@@ -4,6 +4,7 @@ import pytorch_lightning as pl
 import torch.nn.functional as F
 import open_clip
 from typing import Union, Tuple
+
 from src.metrics import *
 from src.losses import clip_loss
 from src.utils import *
@@ -122,15 +123,15 @@ class SheafConvLayer(nn.Module):
         x_ext_0, x_ext_1 = torch.cat([x_img_ext, x_txt_ext], dim=0), torch.cat([x_txt_ext, x_img_ext], dim=0)
         edge_attr = torch.cat([edge_attr, edge_attr], dim=0)
         
-        alignment = alignment(x_ext_0, x_ext_1)
+        alignment_embeddings = alignment(x_ext_0, x_ext_1)
     
         uniformity_img = uniformity(x_ext_0)
         uniformity_txt = uniformity(x_ext_1)
         
-        self.log({'alignment' : alignment_0,
+        additional = {'alignment' : alignment_embeddings,
                   'uniformity img' : uniformity_img,
                   'uniformity txt' : uniformity_txt,
-                  })
+                  }
 
 
         maps = self.predict_restriction_maps(x_ext_0, x_ext_1, edge_attr)
@@ -146,7 +147,7 @@ class SheafConvLayer(nn.Module):
         assert not torch.isnan(x).any(), "NaNs in input to conv"
         assert not torch.isnan(maps).any(), "NaNs in maps"
         assert not torch.isnan(laplacian).any(), "NaNs in laplacian"
-        return x, maps
+        return x, maps, additional
     
 class SheafMultimodalGNN(pl.LightningModule):
     def __init__(
@@ -277,7 +278,9 @@ class SheafMultimodalGNN(pl.LightningModule):
             all_maps = []
             for i, conv in enumerate(self.convs):
                 conv.set_graph(edge_index, self.num_nodes)
-                h, maps = conv(t_img, t_txt, edge_attr, split=split)
+                h, maps, additional = conv(t_img, t_txt, edge_attr, split=split)
+                for key, value in additional.items():                    
+                    self.log(f'{key}_layer_{i}', value, prog_bar=True, on_epoch=True, on_step=False,)
                 h_list.append(h)
                 all_maps.append(maps)
                 
@@ -309,14 +312,14 @@ class SheafMultimodalGNN(pl.LightningModule):
             x_img, x_text, edge_index, edge_attr = process_batch(batch) # for some reason edge_idx[0] != edge_idx[1] 
         
         # Forward pass to get all embeddings
-        embeddings, _ = self.forward(x_img, x_text, edge_index, edge_attr, split=split)
+        embeddings, _ = self(x_img, x_text, edge_index, edge_attr, split=split)
         img_emb = F.normalize(embeddings[: len(edge_attr), :], dim=1)
         txt_emb = F.normalize(embeddings[len(edge_attr):, :], dim=1)
         
         
         #print(f"img emb: {img_emb.shape}, text emb: {txt_emb.shape}")
         sim_matrix = img_emb @ txt_emb.T
-        if self.model.verbose:
+        if self.convs[0].verbose:
             print(f"Embeddings: {embeddings[:5, :5]}")
             print("Similarity matrix (val):", sim_matrix[:5, :5])
 
