@@ -1,6 +1,6 @@
 method: grid
 metric:
-  goal: maximize
+  goal: minimize
   name: val_loss
 parameters:
   epochs:
