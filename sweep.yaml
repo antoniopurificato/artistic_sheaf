@@ -1,7 +1,7 @@
 method: grid
 metric:
   goal: maximize
-  name: val ndcg@20
+  name: val_loss
 parameters:
   epochs:
     values: [5,10]
