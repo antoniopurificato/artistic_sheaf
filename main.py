@@ -49,7 +49,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     # Prepare model parameters using training data
     input_dim = (len(train_node_to_id))
     
-    if not args.sweep: 
+    if not args.sweep:
         # Initialize the model
         model = SheafMultimodalGNN(
             latent_dim=args.latent_dim,
@@ -178,7 +178,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
      
     if not args.sweep:
-        main('data', plot_graph=True, batch_size=64, seed=42, base_folder='data/SemArt/',
+        main('data', plot_graph=True, batch_size=64, seed=42, base_folder='../SemArt/',
             checkpoint_name=None, sweep_config=args)
     else:
         with open('sweep.yaml', 'r') as file:

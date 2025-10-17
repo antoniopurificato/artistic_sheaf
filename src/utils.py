@@ -159,7 +159,7 @@ class GraphEdgeDataset(torch.utils.data.Dataset):
         return batch_img, batch_text, edge, edge_attr
 
 def check_images(x_img, x_text, edge_index):# write first image to file
-    for idx in range(10):
+    for idx in range(min(10, edge_index.shape[0])):
         i, j = edge_index[idx]
         # open image with PIL knowing it's a numpy array (3,224,224) and save it
         img = decode_clip_image(x_img[i].cpu())

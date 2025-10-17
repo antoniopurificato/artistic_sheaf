@@ -23,7 +23,7 @@ class SheafConvLayer(nn.Module):
         self.verbose = verbose
 
         self.sheaf_learner = nn.Sequential(
-            nn.Linear(2 * latent_dim + edge_attr_dim, 64),
+            nn.Linear(latent_dim + edge_attr_dim, 64),
             nn.ReLU(),
             nn.Linear(64, 1),
             #nn.Sigmoid(),#nn.Tanh()
@@ -55,7 +55,7 @@ class SheafConvLayer(nn.Module):
         Returns:
             torch.Tensor: Map values [num_edges, 1].
         """
-        edge_inputs = torch.cat([x_row.to(self.device), x_col.to(self.device), edge_attr.to(self.device)], dim=1)
+        edge_inputs = torch.cat([x_row.to(self.device), edge_attr.to(self.device)], dim=1)
         maps = self.sheaf_learner(edge_inputs)  # Output a scalar map per edge
         if self.verbose:
             print('Checking maps', maps[:5])
@@ -122,12 +122,12 @@ class SheafConvLayer(nn.Module):
         
         x_ext_0, x_ext_1 = torch.cat([x_img_ext, x_txt_ext], dim=0), torch.cat([x_txt_ext, x_img_ext], dim=0)
         edge_attr = torch.cat([edge_attr, edge_attr], dim=0)
-        
-        alignment_embeddings = alignment(x_ext_0, x_ext_1)
-    
-        uniformity_img = uniformity(x_ext_0)
-        uniformity_txt = uniformity(x_ext_1)
-        
+
+        alignment_embeddings = alignment(x_img_ext, x_txt_ext)
+
+        uniformity_img = uniformity(x_img_ext.to(device_2)).to(x_img_ext.device)
+        uniformity_txt = uniformity(x_txt_ext.to(device_2)).to(x_txt_ext.device)
+
         additional = {'alignment' : alignment_embeddings,
                   'uniformity img' : uniformity_img,
                   'uniformity txt' : uniformity_txt,
@@ -232,9 +232,12 @@ class SheafMultimodalGNN(pl.LightningModule):
                 p.requires_grad = clip_grad
                 
         
-    def modify_output(self, input_data, maps):
+    def modify_output(self, input_data, maps, img_text='img'):
         if self.operation == 'sum':
-            output = input_data + maps[:input_data.shape[0]]
+            if img_text == 'img':
+                output = input_data + maps[:input_data.shape[0]]
+            else:
+                output = input_data + maps[input_data.shape[0]:]
         elif self.operation == 'product':
             output = input_data * maps
         elif self.operation == 'concat':
@@ -289,8 +292,8 @@ class SheafMultimodalGNN(pl.LightningModule):
             
             assert not torch.isnan(out).any(), "NaNs in out before expansion"
             
-            img_out = self.modify_output(out[:len(t_img)][edge_index[0]], out_maps)
-            txt_out = self.modify_output(out[len(t_img):][edge_index[1]],out_maps)
+            img_out = self.modify_output(out[:len(t_img)][edge_index[0]], out_maps, img_text='img')
+            txt_out = self.modify_output(out[len(t_img):][edge_index[1]], out_maps, img_text='txt')
         
         else:
             img_out = self.modify_output(t_img[edge_index[0]], edge_attr)

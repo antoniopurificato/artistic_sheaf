@@ -4,53 +4,6 @@ import torch.nn.functional as F
 import open_clip
 import numpy as np 
 
-def get_adjacency_matrix(edge_index):
-    """
-    edge_index: (2, E) torch.LongTensor
-    Returns:
-        adj_matrix: (num_images, num_texts) torch.FloatTensor
-        img_to_idx, txt_to_idx: dicts mapping original IDs to indices
-    """
-    # Extract unique images and texts
-    images = torch.unique(edge_index[0, :]).tolist()
-    texts = torch.unique(edge_index[1, :]).tolist()
-    # Sort for consistent ordering
-    images = sorted(images)
-    texts = sorted(texts)
-    # Create mapping
-    img_to_idx = {img: i for i, img in enumerate(images)}
-    txt_to_idx = {txt: j for j, txt in enumerate(texts)}
-    # Initialize adjacency matrix
-    adj_matrix = torch.zeros((len(images), len(texts)), dtype=torch.float, device=edge_index.device)
-    # Fill adjacency matrix
-    for i in range(edge_index.shape[1]):
-        img_id = int(edge_index[0, i])
-        txt_id = int(edge_index[1, i])
-        adj_matrix[img_to_idx[img_id], txt_to_idx[txt_id]] = 1.0
-    return adj_matrix, img_to_idx, txt_to_idx
-
-
-def get_similarity_matrix(embeddings, img_to_idx, txt_to_idx):
-    """
-    embeddings: torch.Tensor [N, D]
-    img_to_idx, txt_to_idx: dicts from get_adjacency_matrix
-    Returns:
-        sim_matrix: torch.Tensor [num_images, num_texts]
-    """
-    device = embeddings.device
-    # Reorder embeddings using index mapping
-    img_indices = torch.tensor([k for k in img_to_idx.keys()], device=device)
-    txt_indices = torch.tensor([k for k in txt_to_idx.keys()], device=device)
-    reordered_img_emb = embeddings[img_indices]  # [num_images, D]
-    reordered_txt_emb = embeddings[txt_indices]  # [num_texts, D]
-    # Normalize
-    reordered_img_emb = torch.nn.functional.normalize(reordered_img_emb, dim=1)
-    reordered_txt_emb = torch.nn.functional.normalize(reordered_txt_emb, dim=1)
-    # Cosine similarity (matrix multiplication)
-    sim_matrix = reordered_img_emb @ reordered_txt_emb.T  # [num_images, num_texts]
-    return sim_matrix
-
-
 def compute_clip_metrics(src_emb, tgt_emb, topk=(1, 5, 10)):
     """
     Computes retrieval metrics from src_emb (e.g. text) to tgt_emb (e.g. image).
@@ -459,7 +412,7 @@ def compute_relation_aware_metrics(
 
 ## functions
 
-def get_sim_matrix(image_names, text_names, image_embeddings, text_embeddings, img_to_idx, txt_to_idx):
+def get_sim_matrix(image_names, text_names, image_embeddings, text_embeddings, img_to_idx, txt_to_idx, out_emb=False):
     """
     Compute similarity matrix between image and text embeddings.
     """
@@ -479,7 +432,10 @@ def get_sim_matrix(image_names, text_names, image_embeddings, text_embeddings, i
     reordered_txt_emb /= np.linalg.norm(reordered_txt_emb, axis=1, keepdims=True)
     #print(f"Reordered text embeddings shape: {reordered_txt_emb.shape}")
     sim_matrix = reordered_img_emb @ reordered_txt_emb.T
-    return sim_matrix
+    if out_emb:
+        return sim_matrix, reordered_img_emb, reordered_txt_emb
+    else:
+        return sim_matrix
 
 
 def make_adj_matrix(triplets, field='item2'):
