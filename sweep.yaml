@@ -1,0 +1,9 @@
+method: grid
+metric:
+  goal: minimize
+  name: val_loss
+parameters:
+  epochs:
+    values: [5,10]
+program: main.py
+num_attempts: 2187

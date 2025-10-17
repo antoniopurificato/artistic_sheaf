@@ -4,6 +4,7 @@ import pytorch_lightning as pl
 import torch.nn.functional as F
 import open_clip
 from typing import Union, Tuple
+
 from src.metrics import *
 from src.losses import clip_loss
 from src.utils import *
@@ -11,7 +12,8 @@ from src.utils import *
 
 class SheafConvLayer(nn.Module):
     def __init__(self, latent_dim, edge_attr_dim, step_size=1.0, device='cpu',
-                 num_heads=8, head_dim=256, operation='sum', verbose=False):
+                 num_heads=8, head_dim=256, operation='sum',
+                 verbose:bool=False):
         
         super().__init__()
         self.device = device
@@ -29,6 +31,8 @@ class SheafConvLayer(nn.Module):
         
         self.linear = nn.Linear(latent_dim, latent_dim).to(device)
         self.edge_index = None
+        self.left_idx = None
+        self.right_idx = None
         self.num_nodes = None
 
     def set_graph(self, edge_index: torch.Tensor, num_nodes: int):
@@ -53,7 +57,6 @@ class SheafConvLayer(nn.Module):
         """
         edge_inputs = torch.cat([x_row.to(self.device), x_col.to(self.device), edge_attr.to(self.device)], dim=1)
         maps = self.sheaf_learner(edge_inputs)  # Output a scalar map per edge
-
         if self.verbose:
             print('Checking maps', maps[:5])
         return maps
@@ -119,6 +122,17 @@ class SheafConvLayer(nn.Module):
         
         x_ext_0, x_ext_1 = torch.cat([x_img_ext, x_txt_ext], dim=0), torch.cat([x_txt_ext, x_img_ext], dim=0)
         edge_attr = torch.cat([edge_attr, edge_attr], dim=0)
+        
+        alignment_embeddings = alignment(x_ext_0, x_ext_1)
+    
+        uniformity_img = uniformity(x_ext_0)
+        uniformity_txt = uniformity(x_ext_1)
+        
+        additional = {'alignment' : alignment_embeddings,
+                  'uniformity img' : uniformity_img,
+                  'uniformity txt' : uniformity_txt,
+                  }
+
 
         maps = self.predict_restriction_maps(x_ext_0, x_ext_1, edge_attr)
         
@@ -133,7 +147,7 @@ class SheafConvLayer(nn.Module):
         assert not torch.isnan(x).any(), "NaNs in input to conv"
         assert not torch.isnan(maps).any(), "NaNs in maps"
         assert not torch.isnan(laplacian).any(), "NaNs in laplacian"
-        return x, maps
+        return x, maps, additional
     
 class SheafMultimodalGNN(pl.LightningModule):
     def __init__(
@@ -145,9 +159,9 @@ class SheafMultimodalGNN(pl.LightningModule):
         lr: float = 1e-3,
         device: str = 'cpu',
         w_clip: float = 1.0,
-        clip_grad=False,
-        test=True,
-        verbose=False,
+        w_edge_bce: float = 0,#1.0
+        clip_grad=True,
+        test=False,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -158,9 +172,9 @@ class SheafMultimodalGNN(pl.LightningModule):
         self._device = device
         self.test = test
         self.num_nodes = None
-        self.verbose = verbose
         
         self.w_clip = w_clip
+        self.w_edge_bce = w_edge_bce
 
         self.init_clip(clip_grad)
     
@@ -171,8 +185,7 @@ class SheafMultimodalGNN(pl.LightningModule):
             latent_dim,
             edge_attr_dim,
             step_size=self.step_size,
-            device=self._device,
-            verbose=self.verbose,
+            device=self._device
             ) for _ in range(self.num_layers)
         ])
         self.operation = self.convs[0].operation
@@ -248,22 +261,34 @@ class SheafMultimodalGNN(pl.LightningModule):
         t_text = self.clip_model.encode_text(x_text)  # Encode text features
         
         self.num_nodes = t_img.size(0) + t_text.size(0)
+        if torch.isnan(t_img).any():
+            print(x_img.min(), x_img.max())
+            
+        assert not torch.isnan(t_img).any(), "NaNs in CLIP image encoder"
+        assert not torch.isnan(t_text).any(), "NaNs in CLIP text encoder"
         
         t_img = self.input_proj(t_img) # at some point pass to concatenation immediately
         t_txt = self.input_proj(t_text)
         
+        assert not torch.isnan(t_img).any(), "NaNs after input_proj"
+        assert not torch.isnan(t_text).any(), "NaNs after input_proj"
+
         if not self.test:
             h_list = []
             all_maps = []
             for i, conv in enumerate(self.convs):
                 conv.set_graph(edge_index, self.num_nodes)
-                h, maps = conv(t_img, t_txt, edge_attr, split=split)
+                h, maps, additional = conv(t_img, t_txt, edge_attr, split=split)
+                for key, value in additional.items():                    
+                    self.log(f'{key}_layer_{i}', value, prog_bar=True, on_epoch=True, on_step=False,)
                 h_list.append(h)
                 all_maps.append(maps)
                 
             out_maps = torch.stack(all_maps, dim=0).mean(dim=0)
             out = torch.stack(h_list, dim=0).mean(dim=0)
-                    
+            
+            assert not torch.isnan(out).any(), "NaNs in out before expansion"
+            
             img_out = self.modify_output(out[:len(t_img)][edge_index[0]], out_maps)
             txt_out = self.modify_output(out[len(t_img):][edge_index[1]],out_maps)
         
@@ -272,8 +297,11 @@ class SheafMultimodalGNN(pl.LightningModule):
             txt_out = self.modify_output(t_txt[edge_index[1]], edge_attr)
         
         out = torch.cat([img_out, txt_out], dim=0)
+        assert not torch.isnan(out).any(), "NaNs in out after duplication"
+        
         out = self.output_proj(out)
         
+        assert not torch.isnan(out).any(), "NaNs in out after proj"
         return out, edge_index
     
     def step(self, batch, batch_idx, split='train'):
@@ -281,17 +309,17 @@ class SheafMultimodalGNN(pl.LightningModule):
         if split == 'predict':
             x_img, x_text, edge_index, edge_attr, orig_ids = process_batch(batch, split=split) 
         else:
-            x_img, x_text, edge_index, edge_attr = process_batch(batch) 
+            x_img, x_text, edge_index, edge_attr = process_batch(batch) # for some reason edge_idx[0] != edge_idx[1] 
         
         # Forward pass to get all embeddings
-        embeddings, _ = self.forward(x_img, x_text, edge_index, edge_attr, split=split)
+        embeddings, _ = self(x_img, x_text, edge_index, edge_attr, split=split)
         img_emb = F.normalize(embeddings[: len(edge_attr), :], dim=1)
         txt_emb = F.normalize(embeddings[len(edge_attr):, :], dim=1)
         
         
+        #print(f"img emb: {img_emb.shape}, text emb: {txt_emb.shape}")
         sim_matrix = img_emb @ txt_emb.T
-        if self.verbose:
-            print(f"img emb: {img_emb.shape}, text emb: {txt_emb.shape}")
+        if self.convs[0].verbose:
             print(f"Embeddings: {embeddings[:5, :5]}")
             print("Similarity matrix (val):", sim_matrix[:5, :5])
 
@@ -301,7 +329,8 @@ class SheafMultimodalGNN(pl.LightningModule):
 
         metrics_i2t = compute_clip_metrics(img_emb, txt_emb)
         metrics_t2i = compute_clip_metrics(txt_emb, img_emb)
-                
+        self.log(f'{split}_loss_clip', loss_clip, prog_bar=True, on_epoch=True, on_step=False,)
+        
         self.log(f'{split}_loss', loss, prog_bar=True, on_epoch=True, on_step=False,)
         for name, value in metrics_i2t.items():
             self.log(f'{split}_i2t_{name}', value, prog_bar=True, on_epoch=True, on_step=False,)
@@ -412,6 +441,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         """
         val_loss, metrics_i2t, metrics_t2i, _ = self.step(batch, batch_idx, split='val')
         return {'val_loss': val_loss, **{f'val_i2t_{k}': v for k, v in metrics_i2t.items()} , **{f'val_t2i_{k}': v for k, v in metrics_t2i.items()}}
+
     
     def test_step(self, batch: tuple, batch_idx: int) -> dict:
         """

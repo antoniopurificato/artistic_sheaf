@@ -3,18 +3,22 @@ import numpy as np
 import torch
 import pytorch_lightning as pl
 from torch_geometric.data import DataLoader
-#from torch_geometric.loader import ClusterData, ClusterLoader
 from src.ClusterData import ClusterData, ClusterLoader
-
+import argparse
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 import open_clip
+import yaml
+import wandb
+from pytorch_lightning.loggers import WandbLogger
+
+
 
 from src.data import *
 from src.model import *
 from src.utils import *
 
 def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_size:int=1, 
-         base_folder: str = "../wikidata_arthist/", checkpoint_name=None):
+         base_folder: str = "../wikidata_arthist/", checkpoint_name=None, sweep_config=None):
     """
     Main function modified to use SheafMultimodalGNN with train/val/test splits.
     """
@@ -31,33 +35,45 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     _,_, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     
     # Training data
-    train_data_list = load_json_data(train_path)#[:5000]
+    train_data_list = load_json_data(train_path)[:500]
     train_graph_data, train_node_to_id, train_edge_labels = build_graph_from_json(train_data_list, preprocess, tokenizer, base_folder=base_folder)
     train_graph_data = train_graph_data.to(device)
     print("Loaded training data with {} nodes.".format(len(train_node_to_id.keys())))
     
     # Validation data
-    val_data_list = load_json_data(val_path)#[:1000]
+    val_data_list = load_json_data(val_path)[:100]
     val_graph_data, val_node_to_id, val_edge_labels = build_graph_from_json(val_data_list, preprocess, tokenizer, base_folder=base_folder)
     val_graph_data = val_graph_data.to(device)
     print("Loaded val data with {} nodes.".format(len(val_node_to_id.keys())))
 
     # Prepare model parameters using training data
     input_dim = (len(train_node_to_id))
-    latent_dim = 512
     
-    print('initializing model with input_dim:', input_dim, 'and latent_dim:', latent_dim)
-    
-    # Initialize the model
-    model = SheafMultimodalGNN(
-        latent_dim=512,
-        edge_attr_dim=512,
-        num_layers=3,
-        step_size=1.0,
-        lr=1e-4,
-        device=device,
-        verbose=False,
-    )
+    if not args.sweep: 
+        # Initialize the model
+        model = SheafMultimodalGNN(
+            latent_dim=args.latent_dim,
+            edge_attr_dim=args.latent_dim,
+            num_layers=args.sheaf_layers,
+            step_size=1.0,
+            lr=args.lr,
+            device=device
+        )
+        epochs = args.epochs
+        
+    else:
+        run = wandb.init()
+        configuration = wandb.config
+        configuration = obtain_configuration(wandb.config, args)
+        model = SheafMultimodalGNN(
+            latent_dim=configuration['latent_dim'],
+            edge_attr_dim=configuration['latent_dim'],
+            num_layers=configuration['sheaf_layers'],
+            step_size=1.0,
+            lr=configuration['lr'],
+            device=device
+        )
+        epochs = configuration['epochs']
     
     if checkpoint_name:
         checkpoint = torch.load(f"checkpoints/{checkpoint_name}", map_location=device)
@@ -78,7 +94,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
        
     # Configure the trainer with GPU acceleration
     trainer = pl.Trainer(
-        max_epochs=50,
+        max_epochs=epochs,
         accelerator=device,
         devices=1, # Use 1 GPU if available
         callbacks=[
@@ -90,6 +106,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
                 save_top_k=3
             )
         ],
+        logger=True if not args.sweep else WandbLogger(project="artistic_sheaf", entity='sapienza_am'),
         gradient_clip_val=1.0, gradient_clip_algorithm="norm"
     )
     
@@ -113,6 +130,59 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
 
 
 if __name__ == "__main__":
-    #main('data', plot_graph=True, batch_size=512, seed=42, base_folder='data/SemArt/')
-    main('data', plot_graph=True, batch_size=512, seed=42, base_folder='../SemArt/',
-         checkpoint_name=None)
+    
+    
+    parser = argparse.ArgumentParser()
+    
+    parser.add_argument(
+        "--sweep",
+        type=str2bool,
+        default=False
+    )
+
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=64,
+        help="Batch size",
+    )
+    
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=1e-4,
+        help="Learning rate",
+    )
+    
+    parser.add_argument(
+        "--sheaf_layers",
+        type=int,
+        default=3,
+        help="Number of sheaf layers",
+    )
+    
+    parser.add_argument(
+        "--latent_dim",
+        type=int,
+        default=512,
+        help="Latent dimension.",
+    )
+    
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=50,
+        help="Latent dimension.",
+    )
+    
+    args = parser.parse_args()
+     
+    if not args.sweep:
+        main('data', plot_graph=True, batch_size=64, seed=42, base_folder='data/SemArt/',
+            checkpoint_name=None, sweep_config=args)
+    else:
+        with open('sweep.yaml', 'r') as file:
+            sweep_configuration = yaml.safe_load(file)
+        sweep_id = wandb.sweep(sweep=sweep_configuration, project="artistic_sheaf",
+                           entity='sapienza_am')
+        wandb.agent(sweep_id, function=lambda: main(), count=sweep_configuration['num_attempts'])
