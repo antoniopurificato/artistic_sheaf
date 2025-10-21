@@ -73,35 +73,22 @@ class SheafConvLayer(nn.Module):
         """
         device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
         row, col = self.edge_index.to(device_2)
-        row_ext = torch.cat([row, col], dim=0)
-        col_ext = torch.cat([col, row], dim=0)
-        
-        maps = maps.to(device_2)
-        if self.verbose:
-            print(row_ext.shape, col_ext.shape, maps.shape)
-        # Off-diagonal entries are negative product of opposite maps
-        non_diag = maps**2 #-left_maps * right_maps  # [num_edges, 1]
+        left_maps = maps.to(device_2)[:len(row)]
+        right_maps = maps.to(device_2)[len(row):]
+        non_diag_maps = -left_maps * right_maps
 
-        # Diagonal entries are sum of squared maps
-        diag = torch.zeros(self.num_nodes, device=device_2)
-        diag.index_add_(0, row_ext, (maps.squeeze() ** 2))  # Accumulate per node
+        diag_maps = torch.zeros(self.num_nodes, *maps.shape[1:], device=maps.device, dtype=maps.dtype)
+        diag_maps.index_add_(0, row, left_maps * right_maps)
 
-        # Normalize Laplacian
-        d_sqrt_inv = (diag + 1).pow(-0.5)  # add 1 for numerical stability
-        left_norm = d_sqrt_inv[row_ext]
-        right_norm = d_sqrt_inv[col_ext]
-        norm_maps = left_norm * non_diag.squeeze() * right_norm
-        diag_norm = d_sqrt_inv * diag * d_sqrt_inv
+        d_sqrt_inv = (diag_maps + 1).pow(-0.5)
+        left_norm, right_norm = d_sqrt_inv[row], d_sqrt_inv[col]
+        norm_maps = left_norm * non_diag_maps * right_norm
+        diag = d_sqrt_inv * diag_maps * d_sqrt_inv
 
-        # Construct sparse matrix indices and values
-        diag_idx = torch.arange(self.num_nodes, device=device_2)
-        indices = torch.cat([
-            torch.stack([diag_idx, diag_idx], dim=0),
-            torch.stack([row_ext, col_ext], dim=0)
-        ], dim=1)
-        values = torch.cat([diag_norm, norm_maps])
-        laplacian = torch.sparse_coo_tensor(indices, values, (self.num_nodes, self.num_nodes))
-        return laplacian.coalesce()
+        diag_indices = torch.arange(0, self.num_nodes, device=maps.device).view(1, -1).tile(2, 1)
+        all_indices = torch.cat([diag_indices, self.edge_index.to(device_2)], dim=-1)
+        all_values = torch.cat([diag.view(-1), norm_maps.view(-1)])
+        return torch.sparse_coo_tensor(all_indices, all_values, size=(self.num_nodes, self.num_nodes))
     
     def forward(self, x_img, x_txt, edge_attr, split='train') -> Tuple[torch.Tensor, torch.Tensor]:
         """
