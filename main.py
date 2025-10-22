@@ -143,7 +143,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=64,
+        default=512,
         help="Batch size",
     )
     
@@ -178,7 +178,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
      
     if not args.sweep:
-        main('data', plot_graph=True, batch_size=64, seed=42, base_folder='../SemArt/',
+        main('data', plot_graph=True, batch_size=args.batch_size, seed=42, base_folder='../SemArt/',
             checkpoint_name=None, sweep_config=args)
     else:
         with open('sweep.yaml', 'r') as file:
