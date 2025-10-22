@@ -5,7 +5,6 @@ import numpy as np
 from typing import List, Dict, Tuple, Optional
 from torch_geometric.data import Data
 from torch_geometric.utils import to_networkx
-from sentence_transformers import SentenceTransformer
 import matplotlib.pyplot as plt
 import networkx as nx
 import os
