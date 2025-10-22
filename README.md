@@ -15,7 +15,7 @@ cd artistic_sheaf && mkdir data
 Download the SemArt dataset:
 
 ```
-cd data && wget https://researchdata.aston.ac.uk/id/eprint/380/1/SemArt.zip && cd ..
+cd data && wget https://researchdata.aston.ac.uk/id/eprint/380/1/SemArt.zip && unzip SemArt.zip && cd ..
 ```
 
 Then copy the json file into the `data` folder.
