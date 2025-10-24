@@ -313,15 +313,15 @@ class SheafMultimodalGNN(pl.LightningModule):
             print(f"Embeddings: {embeddings[:5, :5]}")
             print("Similarity matrix (val):", sim_matrix[:5, :5])
 
-        loss_clip = clip_loss(img_emb, txt_emb)
+        #loss_clip = clip_loss(img_emb, txt_emb)
         
-        loss = self.w_clip * loss_clip
+        #loss = self.w_clip * loss_clip
 
         metrics_i2t = compute_clip_metrics(img_emb, txt_emb)
         metrics_t2i = compute_clip_metrics(txt_emb, img_emb)
-        self.log(f'{split}_loss_clip', loss_clip, prog_bar=True, on_epoch=True, on_step=False,)
+        # self.log(f'{split}_loss_clip', loss_clip, prog_bar=True, on_epoch=True, on_step=False,)
         
-        self.log(f'{split}_loss', loss, prog_bar=True, on_epoch=True, on_step=False,)
+        # self.log(f'{split}_loss', loss, prog_bar=True, on_epoch=True, on_step=False,)
         for name, value in metrics_i2t.items():
             self.log(f'{split}_i2t_{name}', value, prog_bar=True, on_epoch=True, on_step=False,)
         for name, value in metrics_t2i.items():
@@ -332,6 +332,8 @@ class SheafMultimodalGNN(pl.LightningModule):
         # Relation-aware metrics
         unique_rels = torch.unique(edge_attr.to(device_2), dim=0).to(edge_attr.device)
 
+        loss_clip = 0
+        
         for rel in unique_rels:
             rel_mask = (edge_attr == rel).all(axis=1)
             if rel_mask.sum() == 0:
@@ -339,10 +341,13 @@ class SheafMultimodalGNN(pl.LightningModule):
             
             img_emb_rel = img_emb[rel_mask]
             txt_emb_rel = txt_emb[rel_mask]
+            
         
             # Normalize again (optional if already normalized)
             img_emb_rel = F.normalize(img_emb_rel, dim=1)
             txt_emb_rel = F.normalize(txt_emb_rel, dim=1)
+            
+            loss_clip += clip_loss(img_emb_rel, txt_emb_rel)
         
             # Compute metrics on this subset
             rel_metrics_i2t = compute_clip_metrics(img_emb_rel, txt_emb_rel)
@@ -354,7 +359,10 @@ class SheafMultimodalGNN(pl.LightningModule):
                 self.log(f'{split}_rel_{fingerprint}_i2t_{name}', value, prog_bar=False, on_epoch=True, on_step=False)
             for name, value in rel_metrics_t2i.items():
                 self.log(f'{split}_rel_{fingerprint}_t2i_{name}', value, prog_bar=False, on_epoch=True, on_step=False)
-
+        loss = self.w_clip * loss_clip
+        self.log(f'{split}_loss_clip', loss_clip, prog_bar=True, on_epoch=True, on_step=False,)
+        
+        self.log(f'{split}_loss', loss, prog_bar=True, on_epoch=True, on_step=False,)
         if split == 'predict':
             return img_emb, txt_emb, orig_ids
         else:
