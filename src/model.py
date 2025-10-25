@@ -73,8 +73,9 @@ class SheafConvLayer(nn.Module):
         """
         device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
         row, col = self.edge_index.to(device_2)
-        left_maps = maps.to(device_2)[:len(row)]
-        right_maps = maps.to(device_2)[len(row):]
+        maps = maps.to(device_2)
+        left_maps = maps[:len(row)]
+        right_maps = maps[len(row):]
         non_diag_maps = -left_maps * right_maps
 
         diag_maps = torch.zeros(self.num_nodes, *maps.shape[1:], device=maps.device, dtype=maps.dtype)
@@ -279,12 +280,9 @@ class SheafMultimodalGNN(pl.LightningModule):
             
             assert not torch.isnan(out).any(), "NaNs in out before expansion"
             
-            img_out = self.modify_output(out[:len(t_img)][edge_index[0]], out_maps, img_text='img')
-            txt_out = self.modify_output(out[len(t_img):][edge_index[1]], out_maps, img_text='txt')
+        img_out = self.modify_output(out[:len(t_img)][edge_index[0]], out_maps, img_text='img')
+        txt_out = self.modify_output(out[len(t_img):][edge_index[1]], out_maps, img_text='txt')
         
-        else:
-            img_out = self.modify_output(t_img[edge_index[0]], edge_attr)
-            txt_out = self.modify_output(t_txt[edge_index[1]], edge_attr)
         
         out = torch.cat([img_out, txt_out], dim=0)
         assert not torch.isnan(out).any(), "NaNs in out after duplication"
@@ -313,25 +311,21 @@ class SheafMultimodalGNN(pl.LightningModule):
             print(f"Embeddings: {embeddings[:5, :5]}")
             print("Similarity matrix (val):", sim_matrix[:5, :5])
 
-        #loss_clip = clip_loss(img_emb, txt_emb)
+        loss_clip_init = clip_loss(img_emb, txt_emb)
         
-        #loss = self.w_clip * loss_clip
-
         metrics_i2t = compute_clip_metrics(img_emb, txt_emb)
         metrics_t2i = compute_clip_metrics(txt_emb, img_emb)
-        # self.log(f'{split}_loss_clip', loss_clip, prog_bar=True, on_epoch=True, on_step=False,)
         
-        # self.log(f'{split}_loss', loss, prog_bar=True, on_epoch=True, on_step=False,)
         for name, value in metrics_i2t.items():
             self.log(f'{split}_i2t_{name}', value, prog_bar=True, on_epoch=True, on_step=False,)
         for name, value in metrics_t2i.items():
             self.log(f'{split}_t2i_{name}', value, prog_bar=True, on_epoch=True, on_step=False,)
     
         
-        device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
         # Relation-aware metrics
+        device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
         unique_rels = torch.unique(edge_attr.to(device_2), dim=0).to(edge_attr.device)
-
+        
         loss_clip = 0
         
         for rel in unique_rels:
@@ -342,12 +336,11 @@ class SheafMultimodalGNN(pl.LightningModule):
             img_emb_rel = img_emb[rel_mask]
             txt_emb_rel = txt_emb[rel_mask]
             
-        
             # Normalize again (optional if already normalized)
             img_emb_rel = F.normalize(img_emb_rel, dim=1)
             txt_emb_rel = F.normalize(txt_emb_rel, dim=1)
             
-            loss_clip += clip_loss(img_emb_rel, txt_emb_rel)
+            loss_clip += clip_loss(img_emb_rel, txt_emb_rel) * (img_emb_rel.size(0) / img_emb.size(0))
         
             # Compute metrics on this subset
             rel_metrics_i2t = compute_clip_metrics(img_emb_rel, txt_emb_rel)
@@ -359,14 +352,44 @@ class SheafMultimodalGNN(pl.LightningModule):
                 self.log(f'{split}_rel_{fingerprint}_i2t_{name}', value, prog_bar=False, on_epoch=True, on_step=False)
             for name, value in rel_metrics_t2i.items():
                 self.log(f'{split}_rel_{fingerprint}_t2i_{name}', value, prog_bar=False, on_epoch=True, on_step=False)
-        loss = self.w_clip * loss_clip
-        self.log(f'{split}_loss_clip', loss_clip, prog_bar=True, on_epoch=True, on_step=False,)
         
-        self.log(f'{split}_loss', loss, prog_bar=True, on_epoch=True, on_step=False,)
+        # regularization_loss distance between different embeddings of same image
+        reg_loss = 0
+        loss_elts = 0
+        # group img_emb based on orig ids from edge_index
+        imgs_ids = edge_index[0].to(device_2)
+        for img_id in torch.unique(imgs_ids):
+            img_mask = (imgs_ids == img_id)
+            img_emb_group = img_emb[img_mask]
+            # uniformity of group of embeddings
+            if img_emb_group.shape[0] > 1:
+                centroid = img_emb_group.mean(dim=0, keepdim=True)
+                # Mean squared distance from centroid
+                loss = ((img_emb_group - centroid) ** 2).sum(dim=1).mean()
+                reg_loss += loss
+                loss_elts += 1
+
+        txt_ids = edge_index[1].to(device_2)
+        for txt_id in torch.unique(txt_ids):
+            txt_mask = (txt_ids == txt_id)
+            txt_emb_group = txt_emb[txt_mask]
+            if txt_emb_group.shape[0] > 1:
+                centroid = txt_emb_group.mean(dim=0, keepdim=True)
+                # Mean squared distance from centroid
+                loss = ((txt_emb_group - centroid) ** 2).sum(dim=1).mean()
+                reg_loss += loss
+                loss_elts += 1
+
+        reg_loss = reg_loss / loss_elts if loss_elts > 0 else 0.0  
+        
+        loss = 0.5 * loss_clip + 0 * loss_clip_init + 0.1 * reg_loss
+        
+        self.log(f'{split}_loss', loss, prog_bar=True, on_epoch=True, on_step=False)
+
         if split == 'predict':
             return img_emb, txt_emb, orig_ids
         else:
-            return loss, metrics_i2t, metrics_t2i, loss_clip
+            return loss, metrics_i2t, metrics_t2i, loss
     
     def prediction(self, train_test_loader, N) -> dict:
         """
