@@ -8,12 +8,12 @@ from typing import Union, Tuple
 from src.metrics import *
 from src.losses import clip_loss
 from src.utils import *
+from torch_scatter import scatter_add
 
 
 class SheafConvLayer(nn.Module):
     def __init__(self, latent_dim, edge_attr_dim, step_size=1.0, device='cpu',
-                 num_heads=8, head_dim=256, operation='sum',
-                 verbose:bool=False):
+                 head_dim=256, operation='sum', verbose:bool=True):
         
         super().__init__()
         self.device = device
@@ -23,9 +23,13 @@ class SheafConvLayer(nn.Module):
         self.verbose = verbose
 
         self.sheaf_learner = nn.Sequential(
-            nn.Linear(latent_dim + edge_attr_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1),
+            nn.Linear(latent_dim + edge_attr_dim, 512),
+            nn.LeakyReLU(),
+            nn.Linear(512, 256),
+            nn.LeakyReLU(),
+            nn.Linear(256, 1),
+            #nn.LeakyReLU(),
+            #nn.Linear(64, 1),
             #nn.Sigmoid(),#nn.Tanh()
         ).to(device)
         
@@ -42,7 +46,6 @@ class SheafConvLayer(nn.Module):
     def predict_restriction_maps(
         self, 
         x_row: torch.Tensor,
-        x_col: torch.Tensor,
         edge_attr: torch.Tensor
     ) -> torch.Tensor:
         """
@@ -63,13 +66,13 @@ class SheafConvLayer(nn.Module):
     
     def build_laplacian(self, maps: torch.Tensor) -> torch.Tensor:
         """
-        Builds the Laplacian matrix using learned restriction maps.
-
+        Builds the normalized sheaf Laplacian matrix using learned restriction maps.
+    
         Args:
-            maps (torch.Tensor): Restriction map scalars per edge [num_edges, 1].
-
+            maps (torch.Tensor): Restriction map per directed edge [2*num_edges, d].
+    
         Returns:
-            torch.Tensor: Normalized Laplacian [num_nodes, num_nodes].
+            torch.Tensor: Sparse normalized Laplacian [num_nodes, num_nodes].
         """
         device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
         row, col = self.edge_index.to(device_2)
@@ -78,10 +81,17 @@ class SheafConvLayer(nn.Module):
         right_maps = maps[len(row):]
         non_diag_maps = -left_maps * right_maps
 
-        diag_maps = torch.zeros(self.num_nodes, *maps.shape[1:], device=maps.device, dtype=maps.dtype)
-        diag_maps.index_add_(0, row, left_maps * right_maps)
+        #diag_maps = torch.zeros(self.num_nodes, *maps.shape[1:], device=maps.device, dtype=maps.dtype)
+        #diag_maps.index_add_(0, row, left_maps * right_maps)
+        # Compute F_uv^T F_uv for each edge
+        #diag_edge_contrib = torch.bmm(left_maps.transpose(), left_maps)  # [E, d, d]
+        
+        # Sum over all edges sharing the same source node u
+        diag_maps = scatter_add(left_maps*right_maps, row, dim=0, dim_size=self.num_nodes)
+        #diag_maps = scatter_add(maps**2, row, dim=0, dim_size=self.num_nodes)
 
-        d_sqrt_inv = (diag_maps + 1).pow(-0.5)
+        diag_maps = torch.abs(diag_maps + 1) # nan fix
+        d_sqrt_inv = (diag_maps).pow(-0.5)
         left_norm, right_norm = d_sqrt_inv[row], d_sqrt_inv[col]
         norm_maps = left_norm * non_diag_maps * right_norm
         diag = d_sqrt_inv * diag_maps * d_sqrt_inv
@@ -90,6 +100,7 @@ class SheafConvLayer(nn.Module):
         all_indices = torch.cat([diag_indices, self.edge_index.to(device_2)], dim=-1)
         all_values = torch.cat([diag.view(-1), norm_maps.view(-1)])
         return torch.sparse_coo_tensor(all_indices, all_values, size=(self.num_nodes, self.num_nodes))
+    
     
     def forward(self, x_img, x_txt, edge_attr, split='train') -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -108,21 +119,10 @@ class SheafConvLayer(nn.Module):
         x_img_ext = x_img[self.edge_index[0]]
         x_txt_ext = x_txt[self.edge_index[1]]
         
-        x_ext_0, x_ext_1 = torch.cat([x_img_ext, x_txt_ext], dim=0), torch.cat([x_txt_ext, x_img_ext], dim=0)
+        x_ext_0 = torch.cat([x_img_ext, x_txt_ext], dim=0)
         edge_attr = torch.cat([edge_attr, edge_attr], dim=0)
 
-        alignment_embeddings = alignment(x_img_ext, x_txt_ext)
-
-        uniformity_img = uniformity(x_img_ext.to(device_2)).to(x_img_ext.device)
-        uniformity_txt = uniformity(x_txt_ext.to(device_2)).to(x_txt_ext.device)
-
-        additional = {'alignment' : alignment_embeddings,
-                  'uniformity img' : uniformity_img,
-                  'uniformity txt' : uniformity_txt,
-                  }
-
-
-        maps = self.predict_restriction_maps(x_ext_0, x_ext_1, edge_attr)
+        maps = self.predict_restriction_maps(x_ext_0, edge_attr)
         
         x = torch.cat([x_img, x_txt], dim=0)
         self.num_img_nodes = len(x_img)
@@ -131,11 +131,17 @@ class SheafConvLayer(nn.Module):
         
         y = self.linear(x)
         x = x - self.step_size * torch.sparse.mm(laplacian, y.to(device_2)).to(y.device)
-        
+
+        #print('shape x', x.shape)
+        #if torch.isnan(x).any():
+        #    print('sheaf update went to nan')
+        #    x = torch.nan_to_num(x, nan=0.0, posinf=1e6, neginf=-1e6)
+
         assert not torch.isnan(x).any(), "NaNs in input to conv"
         assert not torch.isnan(maps).any(), "NaNs in maps"
         assert not torch.isnan(laplacian).any(), "NaNs in laplacian"
-        return x, maps, additional
+        
+        return x, maps
     
 class SheafMultimodalGNN(pl.LightningModule):
     def __init__(
@@ -147,9 +153,11 @@ class SheafMultimodalGNN(pl.LightningModule):
         lr: float = 1e-3,
         device: str = 'cpu',
         w_clip: float = 1.0,
-        w_edge_bce: float = 0,#1.0
+        w_mask: float = 0,
+        w_reg: float = 0,
         clip_grad=True,
         test=False,
+        verbose=True,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -162,7 +170,8 @@ class SheafMultimodalGNN(pl.LightningModule):
         self.num_nodes = None
         
         self.w_clip = w_clip
-        self.w_edge_bce = w_edge_bce
+        self.w_mask = w_mask
+        self.w_reg = w_reg
 
         self.init_clip(clip_grad)
     
@@ -173,21 +182,30 @@ class SheafMultimodalGNN(pl.LightningModule):
             latent_dim,
             edge_attr_dim,
             step_size=self.step_size,
-            device=self._device
+            device=self._device,
+            verbose=verbose
             ) for _ in range(self.num_layers)
         ])
         self.operation = self.convs[0].operation
         
-        if self.operation == 'concat':
-            self.output_proj = nn.Sequential(
-            nn.Linear(latent_dim+1, latent_dim),
-            nn.ReLU(),
+        #if self.operation == 'concat':
+        #    self.output_proj = nn.Sequential(
+        #    nn.Linear(latent_dim+1, latent_dim),
+        #    nn.LeakyReLU(),
+        #    nn.Linear(latent_dim, latent_dim),
+        #    nn.LeakyReLU(),
+        #    nn.Linear(latent_dim, latent_dim),
+        #    nn.LeakyReLU(),
+        #    nn.Linear(latent_dim, latent_dim),
+        #)
+        #else:
+        self.output_proj = nn.Sequential(
             nn.Linear(latent_dim, latent_dim),
-        )
-        else:
-            self.output_proj = nn.Sequential(
-            nn.Linear(latent_dim, latent_dim),
-            nn.ReLU(),
+            nn.LeakyReLU(),
+            nn.Linear(latent_dim, latent_dim * 2),
+            nn.LeakyReLU(),
+            nn.Linear(latent_dim * 2, latent_dim),
+            nn.LeakyReLU(),
             nn.Linear(latent_dim, latent_dim),
         )
 
@@ -203,12 +221,12 @@ class SheafMultimodalGNN(pl.LightningModule):
         
         # ---- unfreeze the last TWO transformer blocks ----
         # vision tower
-        for block in list(self.clip_model.visual.transformer.resblocks)[-3:]:
+        for block in list(self.clip_model.visual.transformer.resblocks)[-5:]:
             for p in block.parameters():
                 p.requires_grad = clip_grad
         
         # text tower
-        for block in list(self.clip_model.transformer.resblocks)[-3:]:
+        for block in list(self.clip_model.transformer.resblocks)[-5:]:
             for p in block.parameters():
                 p.requires_grad = clip_grad
         
@@ -233,6 +251,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         else:
             raise ValueError(f'Operation {self.operation} not recognized.')
         return output
+        
 
     def forward(self, x_img, x_text, edge_index, edge_attr, split='train') -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -252,8 +271,6 @@ class SheafMultimodalGNN(pl.LightningModule):
         t_text = self.clip_model.encode_text(x_text)  # Encode text features
         
         self.num_nodes = t_img.size(0) + t_text.size(0)
-        if torch.isnan(t_img).any():
-            print(x_img.min(), x_img.max())
             
         assert not torch.isnan(t_img).any(), "NaNs in CLIP image encoder"
         assert not torch.isnan(t_text).any(), "NaNs in CLIP text encoder"
@@ -269,47 +286,54 @@ class SheafMultimodalGNN(pl.LightningModule):
             all_maps = []
             for i, conv in enumerate(self.convs):
                 conv.set_graph(edge_index, self.num_nodes)
-                h, maps, additional = conv(t_img, t_txt, edge_attr, split=split)
-                for key, value in additional.items():                    
-                    self.log(f'{key}_layer_{i}', value, prog_bar=True, on_epoch=True, on_step=False,)
+                h, maps = conv(t_img, t_txt, edge_attr, split=split)
                 h_list.append(h)
                 all_maps.append(maps)
                 
-            out_maps = torch.stack(all_maps, dim=0).mean(dim=0)
-            out = torch.stack(h_list, dim=0).mean(dim=0)
+            #out_maps = torch.stack(all_maps, dim=0).mean(dim=0)
+            out_maps = all_maps[-1]
+            #out = torch.stack(h_list, dim=0).mean(dim=0)
+            out = h_list[-1]
             
             assert not torch.isnan(out).any(), "NaNs in out before expansion"
+
+        img_out = out[:t_img.shape[0]][edge_index[0]]
+        txt_out = out[t_img.shape[0]:][edge_index[1]]
+        if self.convs[0].verbose:
+            print('out shape', img_out.shape, out_maps.shape)
+            print(f"Embeddings before change: {img_out[:5, :5]}")
             
-        img_out = self.modify_output(out[:len(t_img)][edge_index[0]], out_maps, img_text='img')
-        txt_out = self.modify_output(out[len(t_img):][edge_index[1]], out_maps, img_text='txt')
-        
+        img_out = self.modify_output(img_out, out_maps, img_text='img')
+        txt_out = self.modify_output(txt_out, out_maps, img_text='txt')
         
         out = torch.cat([img_out, txt_out], dim=0)
         assert not torch.isnan(out).any(), "NaNs in out after duplication"
         
-        out = self.output_proj(out)
-        
+        out = self.output_proj(out) # test without
         assert not torch.isnan(out).any(), "NaNs in out after proj"
-        return out, edge_index
+        
+        return out
     
     def step(self, batch, batch_idx, split='train'):
 
         if split == 'predict':
             x_img, x_text, edge_index, edge_attr, orig_ids = process_batch(batch, split=split) 
         else:
-            x_img, x_text, edge_index, edge_attr = process_batch(batch) # for some reason edge_idx[0] != edge_idx[1] 
+            x_img, x_text, edge_index, edge_attr = process_batch(batch)  
         
         # Forward pass to get all embeddings
-        embeddings, _ = self(x_img, x_text, edge_index, edge_attr, split=split)
+        embeddings = self(x_img, x_text, edge_index, edge_attr, split=split)
+        #print(embeddings.shape)
+        
         img_emb = F.normalize(embeddings[: len(edge_attr), :], dim=1)
         txt_emb = F.normalize(embeddings[len(edge_attr):, :], dim=1)
         
-        
-        #print(f"img emb: {img_emb.shape}, text emb: {txt_emb.shape}")
         sim_matrix = img_emb @ txt_emb.T
         if self.convs[0].verbose:
+            print(f"img emb: {img_emb.shape}, text emb: {txt_emb.shape}")
             print(f"Embeddings: {embeddings[:5, :5]}")
-            print("Similarity matrix (val):", sim_matrix[:5, :5])
+        
+        print("Similarity matrix (val):", sim_matrix[:5, :5])
 
         loss_clip_init = clip_loss(img_emb, txt_emb)
         
@@ -324,7 +348,8 @@ class SheafMultimodalGNN(pl.LightningModule):
         
         # Relation-aware metrics
         device_2 = 'cuda' if torch.cuda.is_available() else 'cpu'
-        unique_rels = torch.unique(edge_attr.to(device_2), dim=0).to(edge_attr.device)
+        #unique_rels = torch.unique(edge_attr.to(device_2), dim=0).to(edge_attr.device)
+        unique_rels = torch.unique(edge_attr, dim=0)
         
         loss_clip = 0
         
@@ -335,11 +360,7 @@ class SheafMultimodalGNN(pl.LightningModule):
             
             img_emb_rel = img_emb[rel_mask]
             txt_emb_rel = txt_emb[rel_mask]
-            
-            # Normalize again (optional if already normalized)
-            img_emb_rel = F.normalize(img_emb_rel, dim=1)
-            txt_emb_rel = F.normalize(txt_emb_rel, dim=1)
-            
+             
             loss_clip += clip_loss(img_emb_rel, txt_emb_rel) * (img_emb_rel.size(0) / img_emb.size(0))
         
             # Compute metrics on this subset
@@ -357,7 +378,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         reg_loss = 0
         loss_elts = 0
         # group img_emb based on orig ids from edge_index
-        imgs_ids = edge_index[0].to(device_2)
+        imgs_ids = edge_index[0]
         for img_id in torch.unique(imgs_ids):
             img_mask = (imgs_ids == img_id)
             img_emb_group = img_emb[img_mask]
@@ -369,7 +390,7 @@ class SheafMultimodalGNN(pl.LightningModule):
                 reg_loss += loss
                 loss_elts += 1
 
-        txt_ids = edge_index[1].to(device_2)
+        txt_ids = edge_index[1]
         for txt_id in torch.unique(txt_ids):
             txt_mask = (txt_ids == txt_id)
             txt_emb_group = txt_emb[txt_mask]
@@ -382,9 +403,25 @@ class SheafMultimodalGNN(pl.LightningModule):
 
         reg_loss = reg_loss / loss_elts if loss_elts > 0 else 0.0  
         
-        loss = 0.5 * loss_clip + 0 * loss_clip_init + 0.1 * reg_loss
-        
+        loss = self.w_mask * loss_clip + self.w_clip * loss_clip_init + self.w_reg * reg_loss
+
+        alignment_embeddings = alignment(img_emb, txt_emb)
+
+        uniformity_img = uniformity(img_emb.to(device_2)).to(img_emb.device)
+        uniformity_txt = uniformity(txt_emb.to(device_2)).to(txt_emb.device)
+
+        additional = {'alignment' : alignment_embeddings,
+                      'uniformity img' : uniformity_img,
+                      'uniformity txt' : uniformity_txt,
+                  }
+
+        for key, value in additional.items():                    
+            self.log(f'{split}_{key}', value, prog_bar=True, on_epoch=True, on_step=False,)
+
         self.log(f'{split}_loss', loss, prog_bar=True, on_epoch=True, on_step=False)
+        self.log(f'{split}_reg', reg_loss, prog_bar=True, on_epoch=True, on_step=False)
+        self.log(f'{split}_masked', loss_clip, prog_bar=True, on_epoch=True, on_step=False)
+        self.log(f'{split}_clip', loss_clip_init, prog_bar=True, on_epoch=True, on_step=False)
 
         if split == 'predict':
             return img_emb, txt_emb, orig_ids
@@ -434,18 +471,19 @@ class SheafMultimodalGNN(pl.LightningModule):
         """
         train_loss, metrics_i2t, metrics_t2i, loss_clip = self.step(batch, batch_idx, split='train')
         
-        log_verbose(
-            self,
-            loss_clip,           # your main CLIP loss tensor
-            layer_prefixes={
-                "clip_proj": ["clip_model.visual.proj", "clip_model.text_projection"],
-                "input_proj": ["input_proj"],
-                "output_proj": ["output_proj"],
-                "conv0": ["convs.0.map_head", "convs.0.linear"],
-                "conv1": ["convs.1.map_head", "convs.1.linear"],
-                "conv2": ["convs.2.map_head", "convs.2.linear"],
-            }
-        )
+        if self.convs[0].verbose:
+            log_verbose(
+                self,
+                loss_clip,           # your main CLIP loss tensor
+                layer_prefixes={
+                    "clip_proj": ["clip_model.visual.proj", "clip_model.text_projection"],
+                    "input_proj": ["input_proj"],
+                    "output_proj": ["output_proj"],
+                    "conv0": ["convs.0.map_head", "convs.0.linear"],
+                    "conv1": ["convs.1.map_head", "convs.1.linear"],
+                    "conv2": ["convs.2.map_head", "convs.2.linear"],
+                }
+            )
 
         return {'loss': train_loss, **{f'train_i2t_{k}': v for k, v in metrics_i2t.items()} , **{f'train_t2i_{k}': v for k, v in metrics_t2i.items()}}
 

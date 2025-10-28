@@ -17,7 +17,7 @@ from src.data import *
 from src.model import *
 from src.utils import *
 
-def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_size:int=1, 
+def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_size:int=1,
          base_folder: str = "../wikidata_arthist/", checkpoint_name=None, sweep_config=None):
     """
     Main function modified to use SheafMultimodalGNN with train/val/test splits.
@@ -35,13 +35,13 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     _,_, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     
     # Training data
-    train_data_list = load_json_data(train_path)[:500]
+    train_data_list = load_json_data(train_path)#[:15000]
     train_graph_data, train_node_to_id, train_edge_labels = build_graph_from_json(train_data_list, preprocess, tokenizer, base_folder=base_folder)
     train_graph_data = train_graph_data.to(device)
     print("Loaded training data with {} nodes.".format(len(train_node_to_id.keys())))
     
     # Validation data
-    val_data_list = load_json_data(val_path)[:100]
+    val_data_list = load_json_data(val_path)#[:5000]
     val_graph_data, val_node_to_id, val_edge_labels = build_graph_from_json(val_data_list, preprocess, tokenizer, base_folder=base_folder)
     val_graph_data = val_graph_data.to(device)
     print("Loaded val data with {} nodes.".format(len(val_node_to_id.keys())))
@@ -55,9 +55,13 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
             latent_dim=args.latent_dim,
             edge_attr_dim=args.latent_dim,
             num_layers=args.sheaf_layers,
-            step_size=1.0,
+            step_size=args.step_size,
             lr=args.lr,
-            device=device
+            w_clip = 1,
+            w_mask = 1,
+            w_reg = 0.1,
+            device=device,
+            verbose=True,
         )
         epochs = args.epochs
         
@@ -69,9 +73,13 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
             latent_dim=configuration['latent_dim'],
             edge_attr_dim=configuration['latent_dim'],
             num_layers=configuration['sheaf_layers'],
-            step_size=1.0,
+            step_size=configuration['step_size'],
             lr=configuration['lr'],
-            device=device
+            w_clip = 1,
+            w_mask = 1,
+            w_reg = 0,
+            device=device,
+            verbose=False,
         )
         epochs = configuration['epochs']
     
@@ -88,7 +96,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     
     print('Number of batches', len(train_data_list) // batch_size + 1)
     train_dataset = GraphEdgeDataset(train_graph_data, device)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
     val_dataset = GraphEdgeDataset(val_graph_data, device)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
        
@@ -155,6 +163,13 @@ if __name__ == "__main__":
     )
     
     parser.add_argument(
+        "--step_size",
+        type=float,
+        default=1,
+        help="Sheaf step size",
+    )
+    
+    parser.add_argument(
         "--sheaf_layers",
         type=int,
         default=3,
@@ -178,8 +193,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
      
     if not args.sweep:
-        main('data', plot_graph=True, batch_size=args.batch_size, seed=42, base_folder='../SemArt/',
-            checkpoint_name=None, sweep_config=args)
+        main('data', plot_graph=True, batch_size=args.batch_size, seed=42,
+             base_folder='../', checkpoint_name=None, sweep_config=args)
     else:
         with open('sweep.yaml', 'r') as file:
             sweep_configuration = yaml.safe_load(file)

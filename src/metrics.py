@@ -78,10 +78,6 @@ def compute_precision_at_k(sim_matrix: torch.Tensor,
     # Get top-k indices per query
     _, top_k_indices = torch.topk(sim_matrix, k=k, dim=1)
     
-    #TODO: Ludovica, questo si occupa di estrarre gli id degli item suggeriti.
-    # Manca un metodo che mappa gli id nei rispettivi oggetti e possiamo capire cosa realmente sta suggerendo.
-    recommended = get_top_k_recommendations(sim_matrix=sim_matrix, k=k)
-
     # Gather ground-truth relevance for top-k items
     # Shape: [num_queries, k]
     relevant_at_k = torch.gather(adj_matrix, dim=1, index=top_k_indices)
@@ -216,10 +212,10 @@ def compute_bidirectional_metrics(
         Dict[str, torch.Tensor]: Dictionary containing all computed metrics for both directions
     """
     # Compute metrics for text→image direction
-    t2i_metrics = compute_retrieval_metrics(sim_matrix, adj_matrix, k_values)
+    i2t_metrics = compute_retrieval_metrics(sim_matrix, adj_matrix, k_values)
     
     # Compute metrics for image→text direction
-    i2t_metrics = compute_retrieval_metrics(sim_matrix.T, adj_matrix.T, k_values)
+    t2i_metrics = compute_retrieval_metrics(sim_matrix.T, adj_matrix.T, k_values)
     
     # Combine metrics
     combined_metrics = {}
@@ -411,39 +407,12 @@ def compute_relation_aware_metrics(
 
 
 ## functions
-
-def get_sim_matrix(image_names, text_names, image_embeddings, text_embeddings, img_to_idx, txt_to_idx, out_emb=False):
-    """
-    Compute similarity matrix between image and text embeddings.
-    """
-    img_to_emb = {name: emb for name, emb in zip(image_names, image_embeddings)}
-    txt_to_emb = {name: emb for name, emb in zip(text_names, text_embeddings)} #.squeeze(0)
-    
-    idx_to_img = {v: k for k, v in img_to_idx.items()}
-    idx_to_txt = {v: k for k, v in txt_to_idx.items()}
-    
-    # 4. Reorder embeddings according to adjacency order
-    reordered_img_emb = np.array([img_to_emb[idx_to_img[i]] for i in range(len(img_to_idx))])
-    reordered_txt_emb = np.array([txt_to_emb[idx_to_txt[j]] for j in range(len(txt_to_idx))])
-    
-    # 5. Normalize and compute cosine similarity
-    reordered_img_emb /= np.linalg.norm(reordered_img_emb, axis=1, keepdims=True)
-    #print(f"Reordered image embeddings shape: {reordered_img_emb.shape}")
-    reordered_txt_emb /= np.linalg.norm(reordered_txt_emb, axis=1, keepdims=True)
-    #print(f"Reordered text embeddings shape: {reordered_txt_emb.shape}")
-    sim_matrix = reordered_img_emb @ reordered_txt_emb.T
-    if out_emb:
-        return sim_matrix, reordered_img_emb, reordered_txt_emb
-    else:
-        return sim_matrix
-
-
 def make_adj_matrix(triplets, field='item2'):
     """
     """
     # Separate unique images (item1) and texts (item2)
-    images = sorted({t["item1"] for t in triplets})
-    texts = sorted({t[field] for t in triplets})
+    images = sorted({t["item1"] + t["link"] for t in triplets})
+    texts = sorted({t[field] + t["link"] for t in triplets})
 
     # Create mapping
     img_to_idx = {img: i for i, img in enumerate(images)}
@@ -454,11 +423,48 @@ def make_adj_matrix(triplets, field='item2'):
 
     # Fill matrix
     for t in triplets:
-        i = img_to_idx[t["item1"]]
-        j = txt_to_idx[t[field]]
+        i = img_to_idx[t["item1"] + t["link"]]
+        j = txt_to_idx[t[field] + t["link"]]
         adj_matrix[i, j] = 1
 
     return adj_matrix, img_to_idx, txt_to_idx
+
+def get_sim_matrix(image_names, text_names, image_embeddings, text_embeddings, img_to_idx, txt_to_idx, out_emb=False):
+    """
+    Compute similarity matrix between image and text embeddings.
+    """
+    img_to_emb = {name: emb for name, emb in zip(image_names, image_embeddings)}
+    txt_to_emb = {name: emb for name, emb in zip(text_names, text_embeddings)} #.squeeze(0)
+          
+    idx_to_img = {v: k for k, v in img_to_idx.items()}
+    idx_to_txt = {v: k for k, v in txt_to_idx.items()}
+    
+    # 4. Reorder embeddings according to adjacency order
+    #reordered_img_emb = np.zeros((len(list(img_to_idx)), 512))
+    #for img_name, i in img_to_idx.items():
+    #    reordered_img_emb[i, :] = img_to_emb[img_name]
+    #print(reordered_img_emb.shape)
+    
+    #reordered_txt_emb = np.zeros((len(list(txt_to_idx)), 512))
+    #for txt_name, i in txt_to_idx.items():
+    #    reordered_txt_emb[i, :] = txt_to_emb[txt_name]
+    #print(reordered_txt_emb.shape)
+    
+    reordered_img_emb = np.array([img_to_emb[idx_to_img[i]] for i in range(len(img_to_idx))])
+    reordered_txt_emb = np.array([txt_to_emb[idx_to_txt[j]] for j in range(len(txt_to_idx))])
+    
+    # 5. Normalize and compute cosine similarity
+    reordered_img_emb /= np.linalg.norm(reordered_img_emb, axis=1, keepdims=True)
+    #print(f"Reordered image embeddings shape: {reordered_img_emb.shape}")
+    reordered_txt_emb /= np.linalg.norm(reordered_txt_emb, axis=1, keepdims=True)
+    
+    #print(f"Reordered text embeddings shape: {reordered_txt_emb.shape}")
+    sim_matrix = reordered_img_emb @ reordered_txt_emb.T
+    if out_emb:
+        return sim_matrix, reordered_img_emb, reordered_txt_emb
+    else:
+        return sim_matrix
+
 
 def compute_image_to_text_accuracy(sim_matrix: np.ndarray, adj_matrix: np.ndarray) -> float:
     """
@@ -482,6 +488,7 @@ def compute_image_to_text_accuracy(sim_matrix: np.ndarray, adj_matrix: np.ndarra
     # Compute accuracy
     accuracy = correct.mean()
     return float(accuracy)
+
 
 def alignment(x, y, alpha=2):
     return (x - y).norm(p=2, dim=1).pow(alpha).mean()
