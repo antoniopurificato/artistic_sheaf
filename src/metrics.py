@@ -454,9 +454,9 @@ def get_sim_matrix(image_names, text_names, image_embeddings, text_embeddings, i
     reordered_txt_emb = np.array([txt_to_emb[idx_to_txt[j]] for j in range(len(txt_to_idx))])
     
     # 5. Normalize and compute cosine similarity
-    reordered_img_emb /= np.linalg.norm(reordered_img_emb, axis=1, keepdims=True)
+    #reordered_img_emb /= np.linalg.norm(reordered_img_emb, axis=1, keepdims=True)
     #print(f"Reordered image embeddings shape: {reordered_img_emb.shape}")
-    reordered_txt_emb /= np.linalg.norm(reordered_txt_emb, axis=1, keepdims=True)
+    #reordered_txt_emb /= np.linalg.norm(reordered_txt_emb, axis=1, keepdims=True)
     
     #print(f"Reordered text embeddings shape: {reordered_txt_emb.shape}")
     sim_matrix = reordered_img_emb @ reordered_txt_emb.T

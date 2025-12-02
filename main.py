@@ -35,13 +35,13 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     _,_, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     
     # Training data
-    train_data_list = load_json_data(train_path)#[:15000]
+    train_data_list = load_json_data(train_path)[:15000]
     train_graph_data, train_node_to_id, train_edge_labels = build_graph_from_json(train_data_list, preprocess, tokenizer, base_folder=base_folder)
     train_graph_data = train_graph_data.to(device)
     print("Loaded training data with {} nodes.".format(len(train_node_to_id.keys())))
     
     # Validation data
-    val_data_list = load_json_data(val_path)#[:5000]
+    val_data_list = load_json_data(val_path)[:5000]
     val_graph_data, val_node_to_id, val_edge_labels = build_graph_from_json(val_data_list, preprocess, tokenizer, base_folder=base_folder)
     val_graph_data = val_graph_data.to(device)
     print("Loaded val data with {} nodes.".format(len(val_node_to_id.keys())))
@@ -57,11 +57,13 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
             num_layers=args.sheaf_layers,
             step_size=args.step_size,
             lr=args.lr,
-            w_clip = 1,
+            w_clip = 0,
             w_mask = 1,
-            w_reg = 0.1,
+            w_reg = 0,
             device=device,
             verbose=True,
+            clip_grad=False,
+            residual=True,
         )
         epochs = args.epochs
         
@@ -86,8 +88,8 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     if checkpoint_name:
         checkpoint = torch.load(f"checkpoints/{checkpoint_name}", map_location=device)
         model.load_state_dict(checkpoint['state_dict'])
-        model = model.to(device)
-        model.eval()
+        #model = model.to(device)
+        #model.eval()
         
     print("Creating data loaders...")
     train_graph_data.num_nodes = len(train_graph_data.x)
@@ -194,7 +196,7 @@ if __name__ == "__main__":
      
     if not args.sweep:
         main('data', plot_graph=True, batch_size=args.batch_size, seed=42,
-             base_folder='../', checkpoint_name=None, sweep_config=args)
+             base_folder='../', sweep_config=args)
     else:
         with open('sweep.yaml', 'r') as file:
             sweep_configuration = yaml.safe_load(file)
