@@ -12,7 +12,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import normalize
 from competitors.coli_approaches import evaluate_graph_with_colpali
 
-from src.data import load_json_data, build_graph_from_json
+from competitors.data_competitors import load_json_data, build_graph_from_json
 from src.utils import GraphEdgeDataset
 from src.metrics import *
 
@@ -554,12 +554,14 @@ def evaluate(args):
     
     
     # Load graph data and prepare dataset
-    loaded_data = load_json_data(args.test_data)#[:100]
-    test_graph_data, _, _ = build_graph_from_json(loaded_data, model_img, model_txt, base_folder=args.base_folder, split='test',
-                                                  competitor='msc', vocab=vocab)
+    loaded_data = load_json_data(os.path.join(args.base_folder,args.test_data))#[:100]
+    test_graph_data, _, _ = build_graph_from_json(loaded_data, model=model_img, processor=model_txt, base_folder=args.base_folder, split='test',
+                                                  model_type='msc', vocab=vocab)
     test_graph_data = test_graph_data.to(device)
     graph_data = GraphEdgeDataset(test_graph_data, device=device, )
 
+    
+    print(graph_data)
     # Perform evaluation
     sim, metrics = evaluate_graph_with_colpali(graph_data, loaded_data)
 

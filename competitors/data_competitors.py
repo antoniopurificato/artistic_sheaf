@@ -9,11 +9,81 @@ from PIL import Image
 from torch_geometric.data import Data
 from torch_geometric.utils import to_networkx
 import matplotlib.pyplot as plt
+import open_clip
 import networkx as nx
+from torchvision import transforms
 from transformers import BitsAndBytesConfig, ColPaliForRetrieval, ColPaliProcessor, ColQwen2ForRetrieval, ColQwen2Processor
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'mps')
 # Function to load the model (either ColPali or ColQwen2) and processor based on the model type
+def encode_texts_msc(texts, vocab, model_txt, device, max_len=30):
+    """
+    Encode a list of text strings into embeddings.
+    
+    Args:
+        texts (list): List of text strings to encode
+        vocab (SimpleVocab): Vocabulary object for tokenization
+        model_txt (TextEncoder): Text encoder model
+        device (torch.device): Device to run computation on
+        max_len (int): Maximum sequence length
+        
+    Returns:
+        torch.Tensor: Text embeddings of shape (len(texts), out_dim)
+    """
+    enc = [vocab.encode(t, max_len=max_len) for t in texts]
+    lengths = [len(x) for x in enc]
+    maxL = max(lengths)
+    ids = torch.zeros((len(enc), maxL), dtype=torch.long, device=device)
+    
+    for i, e in enumerate(enc):
+        ids[i, :len(e)] = torch.tensor(e, device=device)
+    
+    with torch.no_grad():
+        emb = model_txt(ids, lengths)
+    
+    return emb
+
+
+def encode_images_msc(images, model_img, device):
+    """
+    Encode a batch of images into embeddings.
+    
+    Args:
+        images (torch.Tensor): Batch of images
+        model_img (ImageEncoder): Image encoder model
+        device (torch.device): Device to run computation on
+        
+    Returns:
+        torch.Tensor: Image embeddings
+    """
+    with torch.no_grad():
+        return model_img(images.to(device))
+
+def get_msc_embedder(itm, model_img, model_text, vocab, base_folder='../wikidata_arthist/'):
+    
+    transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225])
+    ])
+    with torch.no_grad():
+        if 'Images/' in itm:
+            img = Image.open(os.path.join(base_folder, 'SemArt', itm)).convert("RGB")  # force RGB
+            img.verify()  # check if corrupt
+            image = transform(img)
+            image = encode_images_msc(image.unsqueeze(0), model_img, device).unsqueeze(0).unsqueeze(0)
+            if not torch.isfinite(image).all():
+                print("⚠️ Non-finite values in image", itm)
+                image = torch.nan_to_num(image, nan=0.0, posinf=1.0, neginf=0.0)
+            #print('image', image.shape, image.dim(), isinstance(image, torch.Tensor))
+            return image
+        else:
+            #print('encoding text:', itm)
+            text = encode_texts_msc([itm], vocab, model_text, device).squeeze(0)
+            #print('text', text.shape)
+            return text
+
 def load_model_and_processor(model_type="colpali", device='cuda'):
     """
     Dynamically loads the specified model and processor (ColPali or ColQwen2)
@@ -88,7 +158,10 @@ def build_graph_from_json(
     processor,
     base_folder: str,
     item2: str = 'item2',
-    split: str = 'normal'
+    split: str = 'normal',
+    model_type:str = 'colpali',
+    vocab = None,
+
 ) -> Tuple[Data, Dict[str, int], List[str]]:
     """
     Builds a PyTorch Geometric graph from the JSON input, using ColPali or ColQwen2 embeddings.
@@ -108,7 +181,10 @@ def build_graph_from_json(
 
             if val not in node_to_id:
                 node_to_id[val] = node_id_counter
-                emb = get_colpali_embedder(val, model=model, processor=processor, base_folder=base_folder)
+                if model_type != "msc":
+                    emb = get_colpali_embedder(val, model=model, processor=processor, base_folder=base_folder)
+                else:
+                    emb = get_msc_embedder(val, model, processor, vocab, base_folder)
                 node_features.append(emb)
                 node_id_counter += 1
 
@@ -123,7 +199,10 @@ def build_graph_from_json(
         link_text = str(item.get('link', ''))
         raw_edge_labels.append(link_text)
 
-        link_emb = get_colpali_embedder(link_text, model, processor, base_folder)
+        if model_type != "msc":
+            link_emb = get_colpali_embedder(link_text, model, processor, base_folder)
+        else:
+            link_emb = get_msc_embedder(val, model, processor, vocab, base_folder)
         edge_features.append(link_emb)
         if split == 'cluster':
             edge_features.append(link_emb)
@@ -131,7 +210,11 @@ def build_graph_from_json(
     # Convert list of features to tensor format for PyTorch Geometric
     x = node_features
     edge_index = torch.tensor(edge_index_list, dtype=torch.long).t().contiguous()
-    edge_attr = edge_features
+    if model_type == "msc":
+        edge_features_cpu = [feat.cpu() for feat in edge_features]
+        edge_attr = torch.tensor(np.stack(edge_features_cpu, axis=0))
+    else:
+        edge_attr = edge_features
 
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr), node_to_id, raw_edge_labels
 
