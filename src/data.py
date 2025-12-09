@@ -58,7 +58,7 @@ def encode_images_msc(images, model_img, device):
     with torch.no_grad():
         return model_img(images.to(device))
 
-def get_msc_embedder(itm, model_img, model_text, vocab, base_folder='../wikidata_arthist/'):
+def get_msc_embedder(itm, model_img, model_text, vocab, base_folder='../'):
     
     transform = transforms.Compose([
             transforms.Resize((224, 224)),
@@ -90,11 +90,13 @@ def get_msc_embedder(itm, model_img, model_text, vocab, base_folder='../wikidata
             return text
 
 
-def get_clip_embedder(itm, preprocess, tokenizer, base_folder='../wikidata_arthist/'):
+def get_clip_embedder(itm, preprocess, tokenizer, base_folder='../'):
     
     with torch.no_grad():
-        if os.path.isfile(os.path.join(base_folder, itm)) or 'Images/' in itm:
+        if 'Images/' in itm or 'gemalde' in itm or 'zeichnungen' in itm:
             try:
+                if len(itm.split('.')) == 1:
+                    itm = itm + '.jpg'
                 img = Image.open(os.path.join(base_folder, itm)).convert("RGB")  # force RGB
                 img.verify()  # check if corrupt
                 image = preprocess(img).unsqueeze(0)

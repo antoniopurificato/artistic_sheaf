@@ -9,16 +9,20 @@ from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 import open_clip
 import yaml
 import wandb
-from pytorch_lightning.loggers import WandbLogger
-
+#from pytorch_lightning.loggers import WandbLogger
 
 
 from src.data import *
 from src.model import *
 from src.utils import *
 
-def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_size:int=1,
-         base_folder: str = "../wikidata_arthist/", checkpoint_name=None, sweep_config=None):
+def main(data_folder: str = "data", 
+         plot_graph: bool = True, 
+         seed:int=42, 
+         batch_size:int=1,
+         base_folder: str = "../", 
+         checkpoint_name=None, 
+         sweep_config=None):
     """
     Main function modified to use SheafMultimodalGNN with train/val/test splits.
     """
@@ -28,20 +32,20 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     seed_everything(seed=seed)
     
     # Define file paths
-    train_path = os.path.join(data_folder, "triplets_semart_train.json")
-    val_path = os.path.join(data_folder, "triplets_semart_val.json")
+    train_path = os.path.join(data_folder, "hertziana", "train_set.json")
+    val_path = os.path.join(data_folder, "hertziana", "val_set.json")
     
     tokenizer = open_clip.get_tokenizer('ViT-B-32')
     _,_, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     
     # Training data
-    train_data_list = load_json_data(train_path)[:15000]
+    train_data_list = load_json_data(train_path)#[:5000]
     train_graph_data, train_node_to_id, train_edge_labels = build_graph_from_json(train_data_list, preprocess, tokenizer, base_folder=base_folder)
     train_graph_data = train_graph_data.to(device)
     print("Loaded training data with {} nodes.".format(len(train_node_to_id.keys())))
     
     # Validation data
-    val_data_list = load_json_data(val_path)[:5000]
+    val_data_list = load_json_data(val_path)#[:2000]
     val_graph_data, val_node_to_id, val_edge_labels = build_graph_from_json(val_data_list, preprocess, tokenizer, base_folder=base_folder)
     val_graph_data = val_graph_data.to(device)
     print("Loaded val data with {} nodes.".format(len(val_node_to_id.keys())))
@@ -57,13 +61,13 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
             num_layers=args.sheaf_layers,
             step_size=args.step_size,
             lr=args.lr,
-            w_clip = 0,
-            w_mask = 1,
+            w_clip = 1,
+            w_mask = 0,
             w_reg = 0,
             device=device,
-            verbose=True,
-            clip_grad=False,
-            residual=True,
+            verbose=False,
+            clip_grad=True,
+            #residual=False,
         )
         epochs = args.epochs
         
@@ -77,9 +81,6 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
             num_layers=configuration['sheaf_layers'],
             step_size=configuration['step_size'],
             lr=configuration['lr'],
-            w_clip = 1,
-            w_mask = 1,
-            w_reg = 0,
             device=device,
             verbose=False,
         )
