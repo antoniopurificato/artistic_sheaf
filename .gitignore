@@ -1,4 +1,5 @@
-data/
+data/SemArt
+data/Hertziana
 **/__pycache__/
 lightning_logs/
 figures/
