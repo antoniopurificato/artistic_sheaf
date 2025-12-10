@@ -15,93 +15,19 @@ from torchvision import transforms
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def encode_texts_msc(texts, vocab, model_txt, device, max_len=30):
-    """
-    Encode a list of text strings into embeddings.
-    
-    Args:
-        texts (list): List of text strings to encode
-        vocab (SimpleVocab): Vocabulary object for tokenization
-        model_txt (TextEncoder): Text encoder model
-        device (torch.device): Device to run computation on
-        max_len (int): Maximum sequence length
-        
-    Returns:
-        torch.Tensor: Text embeddings of shape (len(texts), out_dim)
-    """
-    enc = [vocab.encode(t, max_len=max_len) for t in texts]
-    lengths = [len(x) for x in enc]
-    maxL = max(lengths)
-    ids = torch.zeros((len(enc), maxL), dtype=torch.long, device=device)
-    
-    for i, e in enumerate(enc):
-        ids[i, :len(e)] = torch.tensor(e, device=device)
-    
-    with torch.no_grad():
-        emb = model_txt(ids, lengths)
-    
-    return emb
 
 
-def encode_images_msc(images, model_img, device):
-    """
-    Encode a batch of images into embeddings.
+def get_clip_embedder(itm, preprocess, tokenizer, base_folder='../wikidata_arthist/',
+                      dataset_name:str="SemArt"):
     
-    Args:
-        images (torch.Tensor): Batch of images
-        model_img (ImageEncoder): Image encoder model
-        device (torch.device): Device to run computation on
-        
-    Returns:
-        torch.Tensor: Image embeddings
-    """
     with torch.no_grad():
-        return model_img(images.to(device))
-
-def get_msc_embedder(itm, model_img, model_text, vocab, base_folder='../'):
-    
-    transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225])
-    ])
-        
-    with torch.no_grad():
-        if os.path.isfile(os.path.join(base_folder, itm)) or 'Images/' in itm:
+        if os.path.isfile(os.path.join(base_folder, dataset_name, itm)) or 'Images/' in itm:
             try:
-                img = Image.open(os.path.join(base_folder, itm)).convert("RGB")  # force RGB
-                img.verify()  # check if corrupt
-                image = transform(img)
-                image = encode_images_msc(image.unsqueeze(0), model_img, device).unsqueeze(0).unsqueeze(0)
-            except Exception as e:
-                print(f"Error loading image {os.path.join(base_folder, itm)}: {e}")
-                image = torch.zeros((3, 224, 224))  # placeholder or skip
-            
-            if not torch.isfinite(image).all():
-                print("⚠️ Non-finite values in image", itm)
-                image = torch.nan_to_num(image, nan=0.0, posinf=1.0, neginf=0.0)
-            #print('image', image.shape, image.dim(), isinstance(image, torch.Tensor))
-            return image
-        else:
-            #print('encoding text:', itm)
-            text = encode_texts_msc([itm], vocab, model_text, device).squeeze(0)
-            #print('text', text.shape)
-            return text
-
-
-def get_clip_embedder(itm, preprocess, tokenizer, base_folder='../'):
-    
-    with torch.no_grad():
-        if 'Images/' in itm or 'gemalde' in itm or 'zeichnungen' in itm:
-            try:
-                if len(itm.split('.')) == 1:
-                    itm = itm + '.jpg'
-                img = Image.open(os.path.join(base_folder, itm)).convert("RGB")  # force RGB
-                img.verify()  # check if corrupt
+                img = Image.open(os.path.join(base_folder, dataset_name, itm)).convert("RGB")  # force RGB
+                img.verify() 
                 image = preprocess(img).unsqueeze(0)
             except Exception as e:
-                print(f"Error loading image {os.path.join(base_folder, itm)}: {e}")
+                print(f"Error loading image {os.path.join(base_folder, dataset_name, itm)}: {e}")
                 image = torch.zeros((3, 224, 224))  # placeholder or skip
             
             if not torch.isfinite(image).all():
@@ -135,8 +61,7 @@ def build_graph_from_json(
     base_folder,
     item2 = 'item2',
     split = 'normal',
-    competitor = None,
-    vocab = None
+    dataset_name:str="SemArt"
 ) -> Tuple[Data, Dict[str, int], List[str], List[str]]:
     """
     Builds a PyTorch Geometric graph from the JSON input.
@@ -167,10 +92,9 @@ def build_graph_from_json(
             if val not in node_to_id:
                 node_to_id[val] = node_id_counter
                 try:
-                    if competitor == 'msc':
-                        embedding = get_msc_embedder(val, preprocess, tokenizer, vocab, base_folder)
-                    else:
-                        embedding = get_clip_embedder(val, preprocess, tokenizer, base_folder)
+
+                    embedding = get_clip_embedder(val, preprocess, tokenizer, base_folder,
+                                                  dataset_name=dataset_name)
                     node_features.append(embedding.squeeze(0))
                     node_id_counter += 1
                 except Exception as e:
@@ -190,10 +114,9 @@ def build_graph_from_json(
         raw_edge_labels.append(link_text)
 
         try:
-            if competitor == 'msc':
-                link_embedding = get_msc_embedder(link_text, preprocess, tokenizer, vocab, base_folder)
-            else:
-                link_embedding = get_clip_embedder(link_text, preprocess, tokenizer, base_folder)
+            link_embedding = get_clip_embedder(link_text, preprocess, tokenizer,
+                                               base_folder,
+                                               dataset_name=dataset_name)
             edge_features.append(link_embedding.squeeze(0))
             if split == 'cluster':
                 edge_features.append(link_embedding.squeeze(0))
@@ -280,7 +203,8 @@ def main(file_name:str, data_folder:str="data",
     _,_, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     
     data_list = load_json_data(json_path)[:2000] #make it batch loading
-    graph_data, node_to_id, raw_edge_labels = build_graph_from_json(data_list, preprocess, tokenizer, base_folder)
+    graph_data, node_to_id, raw_edge_labels = build_graph_from_json(data_list, preprocess, tokenizer, base_folder,
+                                                                    dataset_name="SemArt")
 
     if plot_subgr:
         plot_subgraph(graph_data, node_to_id, raw_edge_labels=raw_edge_labels, num_nodes=100)

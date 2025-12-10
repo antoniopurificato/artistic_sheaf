@@ -1,14 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# ## Baseline scores on semart using CLIP
-
-# In[ ]:
-
-
-get_ipython().run_line_magic('load_ext', 'autoreload')
-get_ipython().run_line_magic('autoreload', '2')
-
 import os
 import json
 import torch
@@ -28,10 +17,13 @@ from src.data import *
 from torch_geometric.data import DataLoader
 from src.metrics import *
 
-triplets = '../artistic_sheaf/data/testing_elements.json'
+dataset_name = "SemArt"
+
+triplets = f'data/{dataset_name}/triplets_{dataset_name.lower()}_test.json'
 #triplets = '../artistic_sheaf/data/full_triplets.json'
 loaded_data = load_json_data(triplets)#[:9914]
 print(f"Loaded {len(loaded_data)} triplets from {triplets}")
+
 
 
 # In[2]:
@@ -62,21 +54,14 @@ model.eval()
 print()
 
 
-# In[3]:
+test_graph_data, test_node_to_id, test_edge_labels = build_graph_from_json(loaded_data, preprocess, tokenizer, base_folder='../SemArt/',
+                                                                           split='test', dataset_name=dataset_name)
 
-
-# Load test data
-test_graph_data, test_node_to_id, test_edge_labels = build_graph_from_json(loaded_data, preprocess, tokenizer, base_folder='../SemArt/', split='test')
-
-
-# In[4]:
 
 
 test_graph_data = test_graph_data.to(device)
 print(test_graph_data.edge_index.shape[1])
 
-
-# In[5]:
 
 
 test_dataset = GraphEdgeDataset(test_graph_data, device=device)
@@ -254,48 +239,9 @@ fig.show()
 #     return predictions_reordered
 
 
-# In[14]:
-
-
-# predictions_txt_new_order = reorder_predictions_by_link_item(
-#     clip_texts,
-#     new_list=loaded_data[len(loaded_data)//2:],  # use only the test portion of the loaded data
-#     old_triplets_path="data/triplets_semart_test_csv.json",
-#     item='item2'
-# )
-# print(predictions_txt_new_order.shape)
-    
-
-
-# In[15]:
-
-
-# predictions_img_new_order = reorder_predictions_by_link_item(
-#     clip_images,
-#     new_list=loaded_data[:len(loaded_data)//2],  # use only the test portion of the loaded data
-#     old_triplets_path="data/triplets_semart_test_csv.json",
-#     item='item1'
-# )
-# print(predictions_img_new_order.shape)
-
-
-# In[16]:
-
-
-# clip_texts = predictions_txt_new_order
-
-# clip_images = predictions_img_new_order
-
-
-# ### Image-to-text retrieval	
-# ### Text-to-image retrieval		
-# r@1	r@5	r@10	
-
-# In[13]:
 
 
 loaded_data = load_json_data("data/triplets_semart_test_csv.json")#[:9914]
-print(f"Loaded {len(loaded_data)} triplets from data/triplets_semart_test_csv.json")
 
 
 # In[14]:
@@ -405,7 +351,8 @@ item2 = 'school' #author, timeframe, school, material, genre
 
 
 test_graph_data, test_node_to_id, test_edge_labels = build_graph_from_json(loaded_data_new, preprocess, tokenizer, 
-                                                                           base_folder='../SemArt/', item2=item2)
+                                                                           base_folder='../SemArt/', item2=item2,
+                                                                           dataset_name=dataset_name)
 test_graph_data = test_graph_data.to(device)
 print("Loaded test data with {} nodes.".format(len(test_node_to_id.keys())))
 print("Creating data loaders...")

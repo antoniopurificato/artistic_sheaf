@@ -9,20 +9,18 @@ from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 import open_clip
 import yaml
 import wandb
-#from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.loggers import WandbLogger
+
 
 
 from src.data import *
 from src.model import *
 from src.utils import *
 
-def main(data_folder: str = "data", 
-         plot_graph: bool = True, 
-         seed:int=42, 
-         batch_size:int=1,
-         base_folder: str = "../", 
-         checkpoint_name=None, 
-         sweep_config=None):
+def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_size:int=1,
+         base_folder: str = "../wikidata_arthist/",
+         checkpoint_name=None, sweep_config=None,
+         dataset_name:str="SemArt"):
     """
     Main function modified to use SheafMultimodalGNN with train/val/test splits.
     """
@@ -32,21 +30,25 @@ def main(data_folder: str = "data",
     seed_everything(seed=seed)
     
     # Define file paths
-    train_path = os.path.join(data_folder, "hertziana", "train_set.json")
-    val_path = os.path.join(data_folder, "hertziana", "val_set.json")
+    train_path = os.path.join(data_folder, dataset_name, f"triplets_{dataset_name.lower()}_train.json")
+    val_path = os.path.join(data_folder, dataset_name, f"triplets_{dataset_name.lower()}_val.json")
     
     tokenizer = open_clip.get_tokenizer('ViT-B-32')
     _,_, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     
     # Training data
-    train_data_list = load_json_data(train_path)#[:5000]
-    train_graph_data, train_node_to_id, train_edge_labels = build_graph_from_json(train_data_list, preprocess, tokenizer, base_folder=base_folder)
+    train_data_list = load_json_data(train_path)[:15000]
+    train_graph_data, train_node_to_id, train_edge_labels = build_graph_from_json(train_data_list, preprocess, tokenizer,
+                                                                                  base_folder=base_folder,
+                                                                                  dataset_name=dataset_name)
     train_graph_data = train_graph_data.to(device)
     print("Loaded training data with {} nodes.".format(len(train_node_to_id.keys())))
     
     # Validation data
-    val_data_list = load_json_data(val_path)#[:2000]
-    val_graph_data, val_node_to_id, val_edge_labels = build_graph_from_json(val_data_list, preprocess, tokenizer, base_folder=base_folder)
+    val_data_list = load_json_data(val_path)[:5000]
+    val_graph_data, val_node_to_id, val_edge_labels = build_graph_from_json(val_data_list, preprocess, tokenizer,
+                                                                            base_folder=base_folder,
+                                                                            dataset_name=dataset_name)
     val_graph_data = val_graph_data.to(device)
     print("Loaded val data with {} nodes.".format(len(val_node_to_id.keys())))
 
@@ -61,13 +63,13 @@ def main(data_folder: str = "data",
             num_layers=args.sheaf_layers,
             step_size=args.step_size,
             lr=args.lr,
-            w_clip = 1,
-            w_mask = 0,
+            w_clip = 0,
+            w_mask = 1,
             w_reg = 0,
             device=device,
-            verbose=False,
-            clip_grad=True,
-            #residual=False,
+            verbose=True,
+            clip_grad=False,
+            residual=True,
         )
         epochs = args.epochs
         
@@ -81,6 +83,9 @@ def main(data_folder: str = "data",
             num_layers=configuration['sheaf_layers'],
             step_size=configuration['step_size'],
             lr=configuration['lr'],
+            w_clip = 1,
+            w_mask = 1,
+            w_reg = 0,
             device=device,
             verbose=False,
         )
@@ -185,6 +190,13 @@ if __name__ == "__main__":
         default=512,
         help="Latent dimension.",
     )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="SemArt",
+        choices=["SemArt", "Hertziana"],
+        help="Name of the dataset.",
+    )
     
     parser.add_argument(
         "--epochs",
@@ -197,7 +209,8 @@ if __name__ == "__main__":
      
     if not args.sweep:
         main('data', plot_graph=True, batch_size=args.batch_size, seed=42,
-             base_folder='../', sweep_config=args)
+             base_folder='data', sweep_config=args,
+             dataset_name=args.dataset)
     else:
         with open('sweep.yaml', 'r') as file:
             sweep_configuration = yaml.safe_load(file)

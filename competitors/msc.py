@@ -10,8 +10,9 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import models, transforms
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import normalize
-from competitors.coli_approaches import evaluate_graph_with_colpali
 
+
+from competitors.coli_approaches import evaluate_graph_with_colpali
 from competitors.data_competitors import load_json_data, build_graph_from_json
 from src.utils import GraphEdgeDataset
 from src.metrics import *
@@ -23,7 +24,7 @@ class MSCTripletDataset(Dataset):
     Groups multiple captions per image.
     """
     
-    def __init__(self, json_path: str, base_folder: str = ".", max_captions=30, img_size=224):
+    def __init__(self, json_path: str, base_folder: str = ".", max_captions=30, img_size=224, dataset_name:str="SemArt"):
         """
         Initialize the dataset.
         
@@ -33,14 +34,14 @@ class MSCTripletDataset(Dataset):
             max_captions (int): Maximum number of captions per image
             img_size (int): Image resize dimension
         """
-        with open(os.path.join(base_folder, json_path), "r", encoding="utf-8") as f:
+        with open(os.path.join(base_folder, dataset_name, json_path), "r", encoding="utf-8") as f:
             data = json.load(f)
         
         # Group captions by image
         grouped = {}
         links = {}
         for d in data:
-            img_path = os.path.join(base_folder, "SemArt", d["item1"])
+            img_path = os.path.join(base_folder, dataset_name, d["item1"])
             cap = d["item2"]
             grouped.setdefault(img_path, []).append(cap)
             link = d["link"]
@@ -98,9 +99,6 @@ def collate_fn(batch):
     return images, caps, idxs
 
 
-# ============================================================================
-# Model Architectures
-# ============================================================================
 
 class ImageEncoder(nn.Module):
     """
@@ -341,9 +339,6 @@ def build_tfidf_groups(caption_groups, dim=128, device='cpu'):
     return per_group
 
 
-# ============================================================================
-# Vocabulary
-# ============================================================================
 
 class SimpleVocab:
     """
@@ -402,11 +397,12 @@ def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
     # Load dataset
-    print(f"\nLoading dataset from: {args.data}")
+    print(f"\nLoading dataset from: {args.dataset}")
     ds = MSCTripletDataset(
-        args.data, 
+        f"triplets_{args.dataset.lower()}_train.json", 
         base_folder=args.base_folder, 
-        max_captions=args.M
+        dataset_name=args.dataset,
+        max_captions=args.M,
     )
     loader = DataLoader(
         ds, 
@@ -554,14 +550,14 @@ def evaluate(args):
     
     
     # Load graph data and prepare dataset
-    loaded_data = load_json_data(os.path.join(args.base_folder,args.test_data))#[:100]
+    loaded_data = load_json_data(os.path.join(args.base_folder, args.dataset, f"triplets_{args.dataset.lower()}_test.json"))#[:100]
     test_graph_data, _, _ = build_graph_from_json(loaded_data, model=model_img, processor=model_txt, base_folder=args.base_folder, split='test',
-                                                  model_type='msc', vocab=vocab)
+                                                  model_type='msc', vocab=vocab, dataset_name=args.dataset)
     test_graph_data = test_graph_data.to(device)
+    print(f"Test graph data: {test_graph_data}")
     graph_data = GraphEdgeDataset(test_graph_data, device=device, )
 
     
-    print(graph_data)
     # Perform evaluation
     sim, metrics = evaluate_graph_with_colpali(graph_data, loaded_data)
 
@@ -576,7 +572,7 @@ def evaluate(args):
         results_path = args.results_file
         with open(results_path, 'w') as f:
             json.dump(results, f, indent=2)
-        print(f"\n✅ Results saved to: {results_path}")
+        print(f"\nResults saved to: {results_path}")
 
 
 
@@ -598,21 +594,17 @@ def main():
     
     # Data paths
     parser.add_argument(
-        "--data",
+        "--dataset",
         type=str,
-        default="triplets_semart_train.json",
+        default="SemArt",
+        choices=["Hertziana", "SemArt"],
         help="Path to training data JSON file (required for train mode)"
     )
-    parser.add_argument(
-        "--test_data",
-        default="triplets_semart_test_csv.json",
-        type=str,
-        help="Path to test data JSON file (required for eval mode)"
-    )
+
     parser.add_argument(
         "--base_folder",
         type=str,
-        default="../SemArt/",
+        default="data",
         help="Base folder for image paths (default: current directory)"
     )
     
@@ -695,15 +687,10 @@ def main():
     
     args = parser.parse_args()
     
-    # Validate arguments based on mode
     if args.mode == "train":
-        if not args.data:
-            parser.error("--data is required for train mode")
         train(args)
     
     elif args.mode == "eval":
-        if not args.test_data:
-            parser.error("--test_data is required for eval mode")
         evaluate(args)
 
 

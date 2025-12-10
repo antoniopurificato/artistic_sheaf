@@ -6,6 +6,7 @@ from PIL import Image
 from torchvision import transforms
 import torch.nn.functional as F 
 import numpy as np
+import argparse
 import os
 
 def str2bool(v):
@@ -148,22 +149,14 @@ class GraphEdgeDataset(torch.utils.data.Dataset):
         edge_attr = self.edge_attrs[idx]
         nodes = torch.unique(edge)
         batch_x = [self.x[int(n)] for n in nodes]
-        try:
-            batch_img = torch.stack([x for x in batch_x if isinstance(x, torch.Tensor) and x.dim() == 3], dim=0).squeeze(0).to(torch.float32).to(self.device) 
-        except Exception as e:
-            print(e)
-            batch_img = torch.zeros((3, 224, 224)).to(torch.float32).to(self.device)
+        batch_img = torch.stack([x for x in batch_x if isinstance(x, torch.Tensor) and x.dim() > 1], dim=0).squeeze(0).to(torch.float32).to(self.device)  # Add batch dimension
         
         if not torch.isfinite(batch_img).all():
             print("⚠️ Non-finite values in image", idx)
             batch_img = torch.nan_to_num(batch_img, nan=0.0, posinf=1.0, neginf=0.0)
         
-        try:
-            batch_text = torch.stack([x for x in batch_x if isinstance(x, torch.Tensor) and x.dim() == 1], dim=0).squeeze(0).to(torch.long).to(self.device)  
-        except Exception as e:
-            print(e)
-            batch_text = torch.zeros((77)).to(torch.long).to(self.device)
-        
+        batch_text = torch.stack([x for x in batch_x if isinstance(x, torch.Tensor) and x.dim() == 1], dim=0).squeeze(0).to(torch.long).to(self.device)  # Add batch dimension
+
         return batch_img, batch_text, edge, edge_attr
 
 def check_images(x_img, x_text, edge_index):# write first image to file

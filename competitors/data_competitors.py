@@ -4,17 +4,14 @@ import json
 import torch
 import numpy as np
 from tqdm import tqdm
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple
 from PIL import Image
 from torch_geometric.data import Data
-from torch_geometric.utils import to_networkx
-import matplotlib.pyplot as plt
-import open_clip
-import networkx as nx
 from torchvision import transforms
-from transformers import BitsAndBytesConfig, ColPaliForRetrieval, ColPaliProcessor, ColQwen2ForRetrieval, ColQwen2Processor
+from transformers import ColPaliForRetrieval, ColPaliProcessor, ColQwen2ForRetrieval, ColQwen2Processor
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'mps')
+
 # Function to load the model (either ColPali or ColQwen2) and processor based on the model type
 def encode_texts_msc(texts, vocab, model_txt, device, max_len=30):
     """
@@ -59,7 +56,8 @@ def encode_images_msc(images, model_img, device):
     with torch.no_grad():
         return model_img(images.to(device))
 
-def get_msc_embedder(itm, model_img, model_text, vocab, base_folder='../wikidata_arthist/'):
+def get_msc_embedder(itm, model_img, model_text, vocab, base_folder='../wikidata_arthist/',
+                     dataset_name:str='SemArt'):
     
     transform = transforms.Compose([
             transforms.Resize((224, 224)),
@@ -69,19 +67,16 @@ def get_msc_embedder(itm, model_img, model_text, vocab, base_folder='../wikidata
     ])
     with torch.no_grad():
         if 'Images/' in itm:
-            img = Image.open(os.path.join(base_folder, 'SemArt', itm)).convert("RGB")  # force RGB
+            img = Image.open(os.path.join(base_folder, dataset_name, itm)).convert("RGB")  # force RGB
             img.verify()  # check if corrupt
             image = transform(img)
             image = encode_images_msc(image.unsqueeze(0), model_img, device).unsqueeze(0).unsqueeze(0)
             if not torch.isfinite(image).all():
                 print("⚠️ Non-finite values in image", itm)
                 image = torch.nan_to_num(image, nan=0.0, posinf=1.0, neginf=0.0)
-            #print('image', image.shape, image.dim(), isinstance(image, torch.Tensor))
             return image
         else:
-            #print('encoding text:', itm)
             text = encode_texts_msc([itm], vocab, model_text, device).squeeze(0)
-            #print('text', text.shape)
             return text
 
 def load_model_and_processor(model_type="colpali", device='cuda'):
@@ -101,7 +96,9 @@ def load_model_and_processor(model_type="colpali", device='cuda'):
     return model, processor
 
 # Function to get embeddings for images or text using ColPali (or ColQwen2)
-def get_colpali_embedder(itm: str, model, processor, base_folder: str = 'data/wikidata_arthist/') -> torch.Tensor:
+def get_colpali_embedder(itm: str, model, processor,
+                         base_folder: str = 'data/wikidata_arthist/',
+                         dataset_name:str='SemArt') -> torch.Tensor:
     """
     Embeds either an image or text input using ColPali (HF API, 4-bit safe).
     Handles dtype and device properly for both images and text.
@@ -111,7 +108,7 @@ def get_colpali_embedder(itm: str, model, processor, base_folder: str = 'data/wi
 
     with torch.no_grad():
         # Check if the input item is an image
-        path_candidate = os.path.join(base_folder, "SemArt", itm)
+        path_candidate = os.path.join(base_folder, dataset_name, itm)
         is_image = (
             os.path.isfile(path_candidate)
             or "Images/" in itm
@@ -119,19 +116,15 @@ def get_colpali_embedder(itm: str, model, processor, base_folder: str = 'data/wi
         )
 
         if is_image:
-            # Process image input
             img_path = path_candidate if os.path.isfile(path_candidate) else itm
             img = Image.open(img_path).convert("RGB")
 
-            # Process and cast dtype
             inputs = processor(images=[img], return_tensors="pt")
             inputs = {k: (v.to(device).to(model_dtype) if v.dtype.is_floating_point else v.to(device))
                      for k, v in inputs.items()}
 
             outputs = model(**inputs)
             emb = outputs.embeddings.mean(dim=1)
-            # emb = inputs['pixel_values'].to(device).to(model_dtype).squeeze(0)
-            #print(emb.shape, 'image')
             return emb
 
         else:
@@ -142,8 +135,7 @@ def get_colpali_embedder(itm: str, model, processor, base_folder: str = 'data/wi
 
             outputs = model(**inputs)
             emb = outputs.embeddings.mean(dim=1).squeeze(0)
-            # emb = inputs['input_ids'].to(device).to(model_dtype).squeeze(0)
-            #print(emb.shape, 'text')
+
             return emb
 
 # Function to load JSON data
@@ -161,6 +153,7 @@ def build_graph_from_json(
     split: str = 'normal',
     model_type:str = 'colpali',
     vocab = None,
+    dataset_name:str="SemArt"
 
 ) -> Tuple[Data, Dict[str, int], List[str]]:
     """
@@ -182,9 +175,13 @@ def build_graph_from_json(
             if val not in node_to_id:
                 node_to_id[val] = node_id_counter
                 if model_type != "msc":
-                    emb = get_colpali_embedder(val, model=model, processor=processor, base_folder=base_folder)
+                    emb = get_colpali_embedder(val, model=model, processor=processor,
+                                               base_folder=base_folder,
+                                               dataset_name=dataset_name)
                 else:
-                    emb = get_msc_embedder(val, model, processor, vocab, base_folder)
+                    emb = get_msc_embedder(val, model, processor, vocab,
+                                           base_folder,
+                                           dataset_name=dataset_name)
                 node_features.append(emb)
                 node_id_counter += 1
 
@@ -200,9 +197,13 @@ def build_graph_from_json(
         raw_edge_labels.append(link_text)
 
         if model_type != "msc":
-            link_emb = get_colpali_embedder(link_text, model, processor, base_folder)
+            link_emb = get_colpali_embedder(link_text, model, processor,
+                                            base_folder,
+                                            dataset_name=dataset_name)
         else:
-            link_emb = get_msc_embedder(val, model, processor, vocab, base_folder)
+            link_emb = get_msc_embedder(val, model, processor, vocab,
+                                        base_folder,
+                                        dataset_name=dataset_name)
         edge_features.append(link_emb)
         if split == 'cluster':
             edge_features.append(link_emb)
@@ -253,20 +254,14 @@ def main(file_name: str, data_folder: str = "data", plot_subgr: bool = True, bas
     """
     json_path = os.path.join(data_folder, file_name)
 
-    # 4-bit quantization config for ColPali or ColQwen2
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.float16,
-    )
 
-    model_name = "vidore/colpali-v1.3-hf"  # You can change this to ColQwen2 model name
-    model_type = "colpali"  # You can dynamically set this to "colqwen2"
+    model_name = "vidore/colpali-v1.3-hf"  
+    model_type = "colpali"  
     model, processor = load_model_and_processor(model_name, model_type=model_type, device=device)
 
     data_list = load_json_data(json_path)[:2000]  # Modify the number of samples as needed
-    graph_data, node_to_id, raw_edge_labels = build_graph_from_json(data_list, model, processor, base_folder)
+    graph_data, node_to_id, raw_edge_labels = build_graph_from_json(data_list, model, processor, base_folder,
+                                                                    dataset_name="SemArt")
 
 # Execute the script if run directly
 if __name__ == "__main__":

@@ -117,8 +117,8 @@ def evaluate_graph_with_colpali(graph_data, loaded_data):
 # Argument parser to handle command-line arguments
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--data', type=str, required=True, help='JSON file with triplets (same format as original)')
-    p.add_argument('--base_folder', type=str, default='d', help='Base folder for images')
+    p.add_argument('--dataset', type=str, required=True, help='Dataset name')
+    p.add_argument('--base_folder', type=str, default='data', help='Base folder for images')
     p.add_argument('--model_type', type=str, default='colpali', choices=['colpali', 'colqwen2'], help='Choose model type: colpali or colqwen2')
     p.add_argument('--save_prefix', type=str, default=None)
     return p.parse_args()
@@ -132,8 +132,9 @@ def main():
     model, processor = load_model_and_processor(model_type=args.model_type, device=device)
     
     # Load graph data and prepare dataset
-    loaded_data = load_json_data(os.path.join(args.base_folder, args.data))[:10]
-    test_graph_data, _, _ = build_graph_from_json(loaded_data, model, processor, base_folder=args.base_folder, split='test')
+    loaded_data = load_json_data(os.path.join(args.base_folder, args.dataset, f"triplets_{args.dataset.lower()}_test.json"))
+    test_graph_data, _, _ = build_graph_from_json(loaded_data, model, processor, base_folder=args.base_folder, split='test',
+                                                  dataset_name=args.dataset)
     test_graph_data = test_graph_data.to(device)
     graph_data = GraphEdgeDataset(test_graph_data, device=device)
 
