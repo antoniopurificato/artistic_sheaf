@@ -1,7 +1,7 @@
 
 mkdir data/Hertziana
-mv -r data/gemalde data/Hertziana/gemalde
-mv -r data/zeichnungen data/Hertziana/zeichnungen
+mv data/gemalde data/Hertziana/gemalde
+mv data/zeichnungen data/Hertziana/zeichnungen
 
 mv data/triplets_hertziana_train.json data/Hertziana/triplets_hertziana_train.json
 mv data/triplets_hertziana_val.json data/Hertziana/triplets_hertziana_val.json

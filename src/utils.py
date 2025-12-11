@@ -35,44 +35,6 @@ def process_batch(batch, check_images_=False, split='sheaf'):
         edge_index = edge_index.t()
         return x_img, x_text, edge_index, edge_attr
     
-    else:    
-        if split == 'predict':
-            x, edge_index, edge_attr, orig_id = batch.x, batch.edge_index, batch.edge_attr, batch.orig_id
-            edge_index, edge_attr, orig_id = redirect_edge_index(edge_index, edge_attr, x, orig_id)
-            orig_id = torch.LongTensor(orig_id) // 2
-        else:
-            x, edge_index, edge_attr = batch.x, batch.edge_index, batch.edge_attr
-            edge_index, edge_attr = redirect_edge_index(edge_index, edge_attr, x)
-        
-        device = x[0].device
-        edge_index = torch.LongTensor(edge_index)#.t()
-        
-        #print(edge_index.shape)
-        
-        img_idxs = [i for i,xx in enumerate(x) if xx.dim() > 1]
-        img_map = {j:i for i, j in enumerate(img_idxs)}
-        
-        txt_idxs = [i for i,xx in enumerate(x) if xx.dim() == 1]
-        txt_map = {j:i for i, j in enumerate(txt_idxs)}
-        x_img = torch.cat([xx.unsqueeze(0) for i, xx in enumerate(x) if i in img_idxs], dim=0)
-        x_text = torch.cat([xx.unsqueeze(0) for i, xx in enumerate(x) if i in txt_idxs], dim=0)
-        edge_attr = torch.cat([xx.unsqueeze(0) for i, xx in enumerate(edge_attr)], dim=0)
-
-        # If you want to remap ALL sources/dests:
-        edge_index[:, 0] = torch.LongTensor([img_map[int(x.detach())] for x in edge_index[:, 0]]).to(device)
-        edge_index[:, 1] = torch.LongTensor([txt_map[int(x.detach())] for x in edge_index[:, 1]]).to(device)
-        
-        if check_images_:
-            check_images(x_img, x_text, edge_index)
-
-        edge_index = edge_index.t()
-        #print(x_img.shape, x_text.shape)
-
-        if split == 'predict':
-            return x_img, x_text, edge_index, edge_attr, orig_id     
-        else:
-            return x_img, x_text, edge_index, edge_attr
-
 def reindex_and_deduplicate(x_img, x_text, edge_index, edge_attr):
     """
     Reindex edge_index and deduplicate x_img and x_text

@@ -10,7 +10,7 @@ import pandas as pd
 
 from typing import List
 from tqdm import tqdm 
-from src.model import SheafMultimodalGNN
+from src.model_loss import SheafMultimodalGNN
 from src.utils import *
 from src.data import *
 # from src.ClusterData import ClusterData, ClusterLoader
@@ -67,27 +67,6 @@ print(test_graph_data.edge_index.shape[1])
 test_dataset = GraphEdgeDataset(test_graph_data, device=device)
 test_loader = DataLoader(test_dataset, batch_size=len(test_dataset) // 3, shuffle=False)
 
-
-# In[6]:
-
-
-# print("Loaded test data with {} nodes.".format(len(test_node_to_id.keys())))
-# print("Creating data loaders...")
-# #batch_size = 768
-# print("Number of parts:", 1)
-# test_graph_data.num_nodes = len(test_graph_data.x)
-# #test_graph_data.orig_id = torch.arange(test_graph_data.edge_index.shape[1])
-# #test_graph_data.edge_attr = torch.cat([test_graph_data.edge_attr, test_graph_data.orig_id.unsqueeze(1)], dim=1)
-
-# dataset = ClusterData(test_graph_data, num_parts=1, recursive=False, save_dir='data/clusters_test')
-# test_loader = ClusterLoader(dataset, batch_size=1, shuffle=False)
-    
-
-
-# In[ ]:
-
-
-#clip_texts = get_clip_texts(loaded_data, 'item2', get_tokenizer('ViT-B-32'), model)
 clip_images = []
 clip_texts = []
 for batch in test_loader:
@@ -103,18 +82,10 @@ for batch in test_loader:
         clip_images.append(F.normalize(embeddings[: len(edge_attr), :], dim=1))
         clip_texts.append(F.normalize(embeddings[len(edge_attr):, :], dim=1))
         
-
-
-# In[7]:
-
-
 clip_images = torch.cat(clip_images, dim=0)
 clip_texts = torch.cat(clip_texts, dim=0)
 
 print(f"Extracted {len(clip_texts)} text embeddings, each of shape {clip_texts[0].shape}")
-
-
-# In[8]:
 
 
 from src.metrics import *
@@ -123,30 +94,6 @@ metrics_t2i = compute_clip_metrics(clip_texts, clip_images)
         
 print(metrics_i2t)
 print(metrics_t2i)
-
-
-# In[ ]:
-
-
-# preds_img = torch.empty((len(loaded_data), 512))
-# preds_txt = torch.empty((len(loaded_data), 512))
-    
-# with torch.no_grad():
-#     for batch in tqdm(test_loader):
-#         batch = batch.to(device)
-#         batch.x, batch.edge_index, batch.edge_attr = batch.x, batch.edge_index, batch.edge_attr
-#         batch.orig_id = batch.edge_attr[:, -1]
-#         batch.edge_attr = batch.edge_attr[:, :-1]
-#         img_emb, txt_emb, orig_ids = model.step(batch, 0, split='predict')
-#         orig = orig_ids.cpu().numpy()
-#         preds_img[orig] = img_emb.detach().cpu()
-#         preds_txt[orig] = txt_emb.detach().cpu()
-        
-# clip_images = F.normalize(preds_img, dim=1)
-# clip_texts = F.normalize(preds_txt, dim=1)
-
-
-# In[9]:
 
 
 clip_images = clip_images.cpu().detach().numpy()

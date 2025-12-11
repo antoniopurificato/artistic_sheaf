@@ -1,6 +1,30 @@
 import torch
 import torch.nn.functional as F
 
+def graph_clip_loss(src_emb, tgt_emb, labels, logit_scale=None):
+    """
+    src_emb: Tensor of shape [N, D] (e.g. text)
+    tgt_emb: Tensor of shape [N, D] (e.g. image)
+    logit_scale: Optional scalar or tensor; defaults to 1 / temperature
+    """
+    # Normalize again, in case not already
+    src_emb = F.normalize(src_emb, dim=1)
+    tgt_emb = F.normalize(tgt_emb, dim=1)
+  
+    assert not torch.isnan(src_emb).any(), "NaN in src_emb"
+    assert not torch.isnan(tgt_emb).any(), "NaN in tgt_emb"
+    
+    # Default logit scale (equivalent to temperature = 1)
+    if logit_scale is None:
+        logit_scale = torch.tensor(1.0).to(src_emb.device)
+    # Compute logits: shape [N, N]
+    logits_per_src = logit_scale * src_emb @ tgt_emb.T
+    logits_per_tgt = logit_scale * tgt_emb @ src_emb.T
+    
+    # Cross-entropy in both directions
+    loss_i2t = F.cross_entropy(logits_per_src, labels)
+    loss_t2i = F.cross_entropy(logits_per_tgt, labels)
+    return (loss_i2t + loss_t2i) / 2
 
 def compute_loss_contrastive(cos_sim_matrix):
         margin = 0.5  # adjust as needed
