@@ -8,7 +8,7 @@ from transformers import CLIPTokenizer
 import networkx as nx
 
 from src.metrics import *
-from src.losses import clip_loss, graph_clip_loss
+from src.losses import clip_loss, graph_clip_loss, compute_KL_loss
 from src.utils import *
 
 
@@ -273,10 +273,12 @@ class SheafMultimodalGNN(pl.LightningModule):
         img_emb = F.normalize(img_emb, dim=1)
         txt_emb = F.normalize(txt_emb, dim=1)
         
-        sim_matrix = img_emb @ txt_emb.T
+        sim_matrix_it = img_emb @ txt_emb.T
+        sim_matrix_ti = txt_emb @ img_emb.T
+        
         if self.convs[0].verbose:
             print(f"img emb: {img_emb.shape}, text emb: {txt_emb.shape}")
-            print(f"Similarity matrix {split}:", sim_matrix[:5, :5])
+            print(f"Similarity matrix {split}:", sim_matrix_it[:5, :5])
         
         G, LG, edge_ids = self.build_lg_from_edge_index(edge_index)
         D = self.compute_ordered_distance_matrix(LG, edge_ids)
@@ -294,8 +296,22 @@ class SheafMultimodalGNN(pl.LightningModule):
             print(f"Distance matrix {split}:", D[:5, :5])
             print(f"Weight matrix {split}:", weights[:5, :5])
         
-        loss_clip_init = graph_clip_loss(img_emb, txt_emb, weights)
-        # loss_clip_init = clip_loss(img_emb, txt_emb)
+        labels = torch.eye(weights.shape[0], device=img_emb.device)
+        
+        p = 0.7 * weights + 0.3 * labels
+        p = p / p.sum(dim=1, keepdim=True)
+
+        p_t = 0.7 * weights.T + 0.3 * labels
+        p_t = p_t / p_t.sum(dim=1, keepdim=True)
+        
+        
+        # loss_clip_init = graph_clip_loss(img_emb, txt_emb, weights)
+        # print(loss_clip_graph.item(), 'graph clip loss')
+        loss_clip_init = clip_loss(img_emb, txt_emb)
+        print(loss_clip_init.item(), 'initial clip loss')
+        loss_kl = (compute_KL_loss(p, sim_matrix_it)  + compute_KL_loss(p_t, sim_matrix_ti)) / 2
+        print(loss_kl.item(), 'kl loss')
+        loss_clip_init = 0.5 * loss_clip_init + 1 * loss_kl
 
         metrics_i2t = compute_clip_metrics(img_emb, txt_emb)
         metrics_t2i = compute_clip_metrics(txt_emb, img_emb)
@@ -319,13 +335,35 @@ class SheafMultimodalGNN(pl.LightningModule):
             
             img_emb_rel = img_emb[rel_mask]
             txt_emb_rel = txt_emb[rel_mask]
+            
+            img_emb_rel = F.normalize(img_emb_rel, dim=1)
+            txt_emb_rel = F.normalize(txt_emb_rel, dim=1)
+            
+            sim_matrix_it_split = img_emb_rel @ txt_emb_rel.T
+            sim_matrix_ti_split = txt_emb_rel @ img_emb_rel.T
+            
             W_rel = W[rel_mask][:, rel_mask]
             alpha = 1.7  # >1 makes distribution more peaked
             weights_rel = (W_rel.clamp(min=0) ** alpha)
             eps = 1e-8
             weights_rel = weights_rel / (weights_rel.sum(dim=1, keepdim=True) + eps)
             
-            loss_clip += graph_clip_loss(img_emb_rel, txt_emb_rel, weights_rel) * (img_emb_rel.size(0) / img_emb.size(0))
+            labels = torch.eye(weights_rel.shape[0], device=img_emb.device)
+        
+            p = 0.7 * weights_rel + 0.3 * labels
+            p = p / p.sum(dim=1, keepdim=True)
+
+            p_t = 0.7 * weights_rel.T + 0.3 * labels
+            p_t = p_t / p_t.sum(dim=1, keepdim=True)
+            
+            # loss_split = graph_clip_loss(img_emb_rel, txt_emb_rel, weights_rel)
+            loss_clip_split = clip_loss(img_emb_rel, txt_emb_rel)
+            print(loss_clip_split.item(), 'initial clip loss split')
+            loss_kl_split = (compute_KL_loss(p, sim_matrix_it_split)  + compute_KL_loss(p_t, sim_matrix_ti_split)) / 2
+            print(loss_kl_split.item(), 'kl loss split')
+            loss_split = 0.5 * loss_clip_init + 1 * loss_kl_split
+
+            loss_clip += loss_split * (img_emb_rel.size(0) / img_emb.size(0))
         
             # Compute metrics on this subset
             rel_metrics_i2t = compute_clip_metrics(img_emb_rel, txt_emb_rel)

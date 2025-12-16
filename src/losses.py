@@ -26,34 +26,25 @@ def graph_clip_loss(src_emb, tgt_emb, labels, logit_scale=None):
     loss_t2i = F.cross_entropy(logits_per_tgt, labels)
     return (loss_i2t + loss_t2i) / 2
 
-def compute_KL_loss(p, q):
+def compute_KL_loss(graph_probs, sim_logits, temperature=0.07):
     """
-    Compute the KL divergence loss between two probability distributions.
-    
-    Args:
-        p (torch.Tensor): The first probability distribution (batch_size, num_classes).
-        q (torch.Tensor): The second probability distribution (batch_size, num_classes).
-        
-    Returns:
-        torch.Tensor: The KL divergence loss.
+    graph_probs: (N, N), row-normalized, detached target distribution
+    sim_logits:  (N, N), raw cosine similarities
     """
-    p = F.log_softmax(p, dim=1)
-    q = F.softmax(q, dim=1)
-    kl_loss = F.kl_div(p, q, reduction='batchmean')
-    return kl_loss
+    log_q = F.log_softmax(sim_logits / temperature, dim=1)
+    p = graph_probs.detach()  # IMPORTANT: stop gradients into graph
+    return F.kl_div(log_q, p, reduction='batchmean')
 
 def compute_loss_contrastive(cos_sim_matrix):
-        margin = 0.5  # adjust as needed
-        adjacency_matrix = torch.eye(cos_sim_matrix.size(0), device=cos_sim_matrix.device) 
-        
-        pos_mask = adjacency_matrix == 1
-        neg_mask = adjacency_matrix == 0
-
-        pos_loss = (1 - cos_sim_matrix[pos_mask]).pow(2).mean()
-        neg_loss = (F.relu(cos_sim_matrix[neg_mask] - margin)).pow(2).mean()
-
-        loss = pos_loss + neg_loss
-        return loss
+    margin = 0.5  # adjust as needed
+    adjacency_matrix = torch.eye(cos_sim_matrix.size(0), device=cos_sim_matrix.device) 
+    
+    pos_mask = adjacency_matrix == 1
+    neg_mask = adjacency_matrix == 0
+    pos_loss = (1 - cos_sim_matrix[pos_mask]).pow(2).mean()
+    neg_loss = (F.relu(cos_sim_matrix[neg_mask] - margin)).pow(2).mean()
+    loss = pos_loss + neg_loss
+    return loss
     
 
 def clip_loss(src_emb, tgt_emb, logit_scale=None):
