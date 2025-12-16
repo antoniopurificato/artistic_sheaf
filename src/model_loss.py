@@ -157,12 +157,12 @@ class SheafMultimodalGNN(pl.LightningModule):
         self.clip_model.text_projection.requires_grad = True
         
         # vision tower
-        for block in list(self.clip_model.visual.transformer.resblocks)[-5:]:
+        for block in list(self.clip_model.visual.transformer.resblocks)[-3:]:
             for p in block.parameters():
                 p.requires_grad = clip_grad
         
         # text tower
-        for block in list(self.clip_model.transformer.resblocks)[-5:]:
+        for block in list(self.clip_model.transformer.resblocks)[-3:]:
             for p in block.parameters():
                 p.requires_grad = clip_grad
         

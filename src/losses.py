@@ -26,6 +26,22 @@ def graph_clip_loss(src_emb, tgt_emb, labels, logit_scale=None):
     loss_t2i = F.cross_entropy(logits_per_tgt, labels)
     return (loss_i2t + loss_t2i) / 2
 
+def compute_KL_loss(p, q):
+    """
+    Compute the KL divergence loss between two probability distributions.
+    
+    Args:
+        p (torch.Tensor): The first probability distribution (batch_size, num_classes).
+        q (torch.Tensor): The second probability distribution (batch_size, num_classes).
+        
+    Returns:
+        torch.Tensor: The KL divergence loss.
+    """
+    p = F.log_softmax(p, dim=1)
+    q = F.softmax(q, dim=1)
+    kl_loss = F.kl_div(p, q, reduction='batchmean')
+    return kl_loss
+
 def compute_loss_contrastive(cos_sim_matrix):
         margin = 0.5  # adjust as needed
         adjacency_matrix = torch.eye(cos_sim_matrix.size(0), device=cos_sim_matrix.device) 

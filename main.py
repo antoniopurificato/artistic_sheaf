@@ -61,12 +61,12 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
             num_layers=args.sheaf_layers,
             step_size=args.step_size,
             lr=args.lr,
-            w_clip = 1,
-            w_mask = 0,
+            w_clip = 0.4,
+            w_mask = 0.6,
             w_reg = 0,
             device=device,
             verbose=False,
-            clip_grad=False,
+            clip_grad=True,
         )
         epochs = args.epochs
         

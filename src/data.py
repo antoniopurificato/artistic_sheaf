@@ -21,7 +21,7 @@ def get_clip_embedder(itm, preprocess, tokenizer, base_folder='../wikidata_arthi
                       dataset_name:str="SemArt"):
     
     with torch.no_grad():
-        if os.path.isfile(os.path.join(base_folder, dataset_name, itm)) or 'Images' in itm or 'gemalde' in itm or 'zeichnungen' in itm:
+        if 'Images' in itm or 'gemalde' in itm or 'zeichnungen' in itm:
             try:
                 if len(itm.split('.')) == 1:
                     itm = itm + '.jpg'
