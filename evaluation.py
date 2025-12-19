@@ -16,7 +16,7 @@ from src.data import *
 from torch_geometric.data import DataLoader
 from src.metrics import *
 
-dataset_name = "Hertziana"
+dataset_name = "SemArt"
 verbose = False
 
 triplets = f'data/{dataset_name}/triplets_{dataset_name.lower()}_test.json'
@@ -43,7 +43,7 @@ model = SheafMultimodalGNN(
 )
     
 # Load checkpoint
-checkpoint = torch.load("checkpoints/sheaf-gnn-epoch=40-val_loss=4.77_hertziana_full_2whole_8mask.ckpt", map_location=device)
+checkpoint = torch.load("checkpoints/sheaf-gnn-epoch=23-val_loss=5.34_semart_laplacian.ckpt", map_location=device)
 model.load_state_dict(checkpoint['state_dict'])
 model = model.to(device)
 model.eval()
@@ -60,7 +60,7 @@ test_graph_data = test_graph_data.to(device)
 print("Loaded test data with {} nodes.".format(len(test_node_to_id.keys())))
 
 test_dataset = GraphEdgeDataset(test_graph_data, device=device)
-num_batches = max(1, len(test_dataset) // 8000)
+num_batches = max(1, len(test_dataset) // 5000)
 print('Using {} batches for testing.'.format(num_batches))
 test_loader = DataLoader(test_dataset, batch_size=len(test_dataset) // num_batches, shuffle=False)
 

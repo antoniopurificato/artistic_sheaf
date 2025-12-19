@@ -241,6 +241,22 @@ class SheafMultimodalGNN(pl.LightningModule):
         edge_ids = [G[u][v][key]['edge_id'] for (u, v, key) in lg_nodes]
 
         return G, LG, edge_ids
+    
+    def laplacian_heat_kernel(self, LG, tau=1.0, device="cpu"):
+        # adjacency
+        A = nx.to_numpy_array(LG)
+        A = torch.tensor(A, dtype=torch.float32, device=device)
+
+        # degree
+        deg = torch.diag(A.sum(dim=1))
+
+        # Laplacian
+        L = deg - A
+
+        # Heat kernel
+        W = torch.matrix_exp(-tau * L)
+
+        return W
 
     def compute_ordered_distance_matrix(self,LG, edge_ids):
         N = len(edge_ids)
@@ -281,16 +297,23 @@ class SheafMultimodalGNN(pl.LightningModule):
             print(f"Similarity matrix {split}:", sim_matrix_it[:5, :5])
         
         G, LG, edge_ids = self.build_lg_from_edge_index(edge_index)
-        D = self.compute_ordered_distance_matrix(LG, edge_ids)
+        # D = self.compute_ordered_distance_matrix(LG, edge_ids)
         
-        W = torch.exp(-D)      # soft decay
-        W[D >= 3] = 0
-        W[D == float('inf')] = 0
-        W = W.to(img_emb.device)
-        alpha = 1.7  # >1 makes distribution more peaked
-        weights = (W.clamp(min=0) ** alpha)
+        W = self.laplacian_heat_kernel(LG, tau=0.7, device=img_emb.device)
+
+        alpha = 1.7
         eps = 1e-8
+        weights = (W.clamp(min=0) ** alpha)
         weights = weights / (weights.sum(dim=1, keepdim=True) + eps)
+        
+        # W = torch.exp(-D)      # soft decay
+        # W[D >= 3] = 0
+        # W[D == float('inf')] = 0
+        # W = W.to(img_emb.device)
+        # alpha = 1.7  # >1 makes distribution more peaked
+        # weights = (W.clamp(min=0) ** alpha)
+        # eps = 1e-8
+        # weights = weights / (weights.sum(dim=1, keepdim=True) + eps)
         
         if self.convs[0].verbose:
             print(f"Distance matrix {split}:", D[:5, :5])
