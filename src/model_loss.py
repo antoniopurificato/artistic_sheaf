@@ -68,9 +68,13 @@ class SheafConvLayer(nn.Module):
             Tensor: Updated node features [num_nodes, latent_dim]
         """
         
-        # expanding to duplicated vals
-        x_img_ext = x_img[self.edge_index[0]]
-        x_txt_ext = x_txt[self.edge_index[1]]
+        if split == 'predict':
+            x_img_ext = x_img
+            x_txt_ext = x_txt
+        else:
+            # expanding to duplicated vals
+            x_img_ext = x_img[self.edge_index[0]]
+            x_txt_ext = x_txt[self.edge_index[1]]
         
         x_ext_0 = torch.cat([x_img_ext, x_txt_ext], dim=0)
         edge_attr = torch.cat([edge_attr, edge_attr], dim=0)
@@ -481,6 +485,44 @@ class SheafMultimodalGNN(pl.LightningModule):
         return {'loss': train_loss, **{f'train_i2t_{k}': v for k, v in metrics_i2t.items()}, 
                 **{f'train_t2i_{k}': v for k, v in metrics_t2i.items()}}
 
+    def predict(self, x_img, x_text, edge_attr):
+        """
+        Predict image embeddings for given image paths.
+
+        Args:
+            image_paths (List[str]): List of image file paths
+        Returns:
+            Tensor: Image embeddings
+        """
+        with torch.no_grad():
+            edge_attr = self.clip_model.encode_text(edge_attr) 
+
+            t_img = self.clip_model.encode_image(x_img)  # Encode image features
+            t_text = self.clip_model.encode_text(x_text)  # Encode text features
+            
+            self.num_nodes = t_img.size(0) + t_text.size(0)
+                
+            t_img = self.input_proj_image(t_img) # at some point pass to concatenation immediately
+            t_txt = self.input_proj_text(t_text)
+            
+            h_list_img = []
+            h_list_txt = []
+            all_maps = []
+            for i, conv in enumerate(self.convs):
+                t_img, t_txt, maps = conv(t_img, t_txt, edge_attr, split='predict')
+                
+                h_list_img.append(t_img)
+                h_list_txt.append(t_txt)
+                all_maps.append(maps)
+                
+            out_img = torch.stack(h_list_img, dim=0).mean(dim=0)
+            out_txt = torch.stack(h_list_txt, dim=0).mean(dim=0)
+                
+        out_img = F.normalize(out_img, dim=1)
+        out_txt = F.normalize(out_txt, dim=1)
+        return out_img, out_txt
+    
+    
     def validation_step(self, batch: tuple, batch_idx: int) -> dict:
         """
         Validation step to evaluate model performance on validation data.
@@ -496,7 +538,6 @@ class SheafMultimodalGNN(pl.LightningModule):
         return {'val_loss': val_loss, **{f'val_i2t_{k}': v for k, v in metrics_i2t.items()}, 
                 **{f'val_t2i_{k}': v for k, v in metrics_t2i.items()}}
 
-    
     def test_step(self, batch: tuple, batch_idx: int) -> dict:
         """
         Test step to evaluate model performance on test data.
