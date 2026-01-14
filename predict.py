@@ -66,14 +66,31 @@ model = model.to(device)
 model.eval()
 print()
 
-with torch.no_grad():
-    image_embeddings, text_embeddings = model.predict(images, texts, links)
+clip_images = []
+clip_texts = []
+
+# iterate over batch sizes of 5000
+batch_size = 5000
+for batch_start in range(0, len(images), batch_size):
+    batch_end = min(batch_start + batch_size, len(images))
+    with torch.no_grad():
+        image_embeddings_batch, text_embeddings_batch = model.predict(
+            images[batch_start:batch_end], 
+            texts[batch_start:batch_end], 
+            links[batch_start:batch_end]
+        )
+    clip_images.append(image_embeddings_batch.cpu().detach().numpy())
+    clip_texts.append(text_embeddings_batch.cpu().detach().numpy())
+    print(f"Processed batch {batch_start} to {batch_end}")
+    
+#with torch.no_grad():
+#    image_embeddings, text_embeddings = model.predict(images, texts, links)
     
 # save as npy for future use
-clip_images = image_embeddings.cpu().detach().numpy()
-clip_texts = text_embeddings.cpu().detach().numpy()
+clip_images = np.concatenate(clip_images, axis=0)
+clip_texts = np.concatenate(clip_texts, axis=0)
 print(f"Extracted {len(clip_texts)} text embeddings, each of shape {clip_texts[0].shape}")
 print(f"Extracted {len(clip_images)} image embeddings, each of shape {clip_images[0].shape}")
 
-np.save(f'data/{dataset_name}/clip_images_semart_test.npy', clip_images)
-np.save(f'data/{dataset_name}/clip_texts_semart_test.npy', clip_texts)
+np.save(f'data/{dataset_name}/clip_images_{dataset_name.lower()}_test.npy', clip_images)
+np.save(f'data/{dataset_name}/clip_texts_{dataset_name.lower()}_test.npy', clip_texts)

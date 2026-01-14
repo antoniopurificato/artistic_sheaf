@@ -16,7 +16,7 @@ from src.data import *
 from torch_geometric.data import DataLoader
 from src.metrics import *
 
-dataset_name = "SemArt"
+dataset_name = "Hertziana"
 verbose = False
 
 triplets = f'data/{dataset_name}/triplets_{dataset_name.lower()}_test.json'
@@ -43,7 +43,7 @@ model = SheafMultimodalGNN(
 )
     
 # Load checkpoint
-checkpoint = torch.load("checkpoints/sheaf-gnn-epoch=23-val_loss=5.34_semart_laplacian.ckpt", map_location=device)
+checkpoint = torch.load("checkpoints/sheaf-gnn-epoch=05-val_loss=5.59_hertz_kl_lapl.ckpt", map_location=device)
 model.load_state_dict(checkpoint['state_dict'])
 model = model.to(device)
 model.eval()
@@ -87,6 +87,9 @@ print(f"Extracted {len(clip_images)} image embeddings, each of shape {clip_image
 
 clip_images = clip_images.cpu().detach().numpy()
 clip_texts = clip_texts.cpu().detach().numpy()
+# save image and text embeddings for future use npy
+np.save('clip_images_semart_test.npy', clip_images)
+np.save('clip_texts_semart_test.npy', clip_texts)
 
 adj_matrix, img_to_idx, txt_to_idx = make_adj_matrix(loaded_data) 
 print(f"Adjacency matrix shape: {adj_matrix.shape}")
@@ -96,6 +99,7 @@ sim_matrix = get_sim_matrix([t["item1"] + t["link"] for t in loaded_data],
                             clip_images, clip_texts,
                             img_to_idx, txt_to_idx)
 print(f"Similarity matrix shape: {sim_matrix.shape}")
+
 
 results = compute_bidirectional_metrics(torch.tensor(sim_matrix), torch.tensor(adj_matrix), k_values=[1, 5, 10])
 recalls = [k for k in results.keys() if 'recall' in k and 'mean' not in k]
