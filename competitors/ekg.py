@@ -432,6 +432,32 @@ def evaluate(
 
     return (preds == labels[test_idx]).float().mean().item()
 
+@torch.no_grad()
+def evaluate_per_link(
+    gnn: nn.Module,
+    clf: nn.Module,
+    data: Data,
+    labels: torch.Tensor,
+    test_idx: torch.Tensor,
+    idx2label: Dict[int, str]
+) -> Dict[str, float]:
+    gnn.eval()
+    clf.eval()
+
+    h = gnn(data)
+    logits = clf(h[test_idx])
+    preds = logits.argmax(dim=1)
+    y = labels[test_idx]
+
+    out = {}
+    for c, name in idx2label.items():
+        mask = (y == c)
+        if mask.any():
+            out[name] = (preds[mask] == y[mask]).float().mean().item()
+        else:
+            out[name] = float("nan")
+    return out
+
 def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -454,6 +480,7 @@ def main(args):
     all_labels = [e["link"] for e in train_data + test_data]
     label2idx = {l: i for i, l in enumerate(sorted(set(all_labels)))}
     num_classes = len(label2idx)
+    idx2label = {i: l for l, i in label2idx.items()}
 
     train_ds = ImageLabelDataset(
         args.dataset, args.base_folder, label2idx=label2idx, split="train"
@@ -534,8 +561,22 @@ def main(args):
     )
 
     print(f"\n✅ GNNBoost Accuracy: {acc:.4f}")
+    acc_per_link = evaluate_per_link(
+        gnn,
+        clf,
+        data,
+        torch.cat([y_train, y_test]),
+        test_idx,
+        idx2label
+    )
 
-
+    print("Per-link accuracy:")
+    for link_name, a in sorted(acc_per_link.items(), key=lambda x: x[0]):
+        if a == a:  # not nan
+            print(f"  {link_name}: {a:.4f}")
+        else:
+            print(f"Error! No samples!")
+ 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", required=True)
