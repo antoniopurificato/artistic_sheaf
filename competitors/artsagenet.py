@@ -1,17 +1,14 @@
-from typing import List, Optional, Tuple, NamedTuple
-from PIL import Image
-import torch
 import torch
 import copy
 from tqdm import tqdm
-from sklearn.metrics import average_precision_score, classification_report
 from datetime import datetime
 import argparse
 from torchvision import transforms, models
 import torch.nn.functional as F
 from torch_geometric.nn import SAGEConv
-
 from competitors.utils_competitors import *
+
+IGNORE_INDEX = -100
 
 
 class ArtSAGENet(nn.Module):
@@ -32,7 +29,8 @@ class ArtSAGENet(nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels,
                  dropout=0.5, fine_tune=True, 
                  merge='concatenate', multitask=True,
-                 task_type="classification"):
+                 task_type="classification",
+                 task_names:list=None):
         """
         Initialize ArtSAGENet model.
         
@@ -58,6 +56,7 @@ class ArtSAGENet(nn.Module):
         self.merge = merge
         self.multitask = multitask
         self.task_type = task_type
+
         
         # CNN backbone: ResNet-152
         self.cnn = models.resnet34(pretrained=fine_tune)
@@ -75,36 +74,18 @@ class ArtSAGENet(nn.Module):
         
         # GraphSAGE layers
         self.num_layers = 2
+        self.tasks = {}
+        for task in task_names:
+            self.tasks[task] = None
         self.gnn = nn.ModuleList()
         self.gnn.append(SAGEConv(in_channels, hidden_channels))
         self.gnn.append(SAGEConv(hidden_channels, hidden_channels))
         
         # Task-specific output heads
         if self.multitask:
-            # Multi-task learning: separate head for each task
-            if self.merge == 'concatenate':
-                self.task1 = nn.Linear(hidden_channels * 2, out_channels[0])
-                self.task2 = nn.Linear(hidden_channels * 2, out_channels[1])
-                if self.task_type == "classification":
-                    self.task3 = nn.Linear(hidden_channels * 2, out_channels[-1])
-                else:
-                    self.task3 = nn.Linear(hidden_channels * 2, 1)
-
-
-            else:
-                self.task1 = nn.Linear(hidden_channels, out_channels[0])
-                self.task2 = nn.Linear(hidden_channels, out_channels[1])
-                if self.task_type == "classification":
-                    self.task3 = nn.Linear(hidden_channels * 2, out_channels[-1])
-                else:
-                    self.task3 = nn.Linear(hidden_channels * 2, 1)
-        else:
-            # Single-task learning
-            if self.merge == 'concatenate':
-                self.task1 = nn.Linear(hidden_channels * 2, out_channels)
-            else:
-                self.task1 = nn.Linear(hidden_channels, out_channels)
-
+            for index, value in enumerate(task_names):
+                self.tasks[value] = nn.Linear(hidden_channels * 2, out_channels[index])
+        
     def forward(self, image, node_features, adjs):
         """
         Forward pass through ArtSAGENet.
@@ -146,10 +127,10 @@ class ArtSAGENet(nn.Module):
 
         # Task-specific predictions
         if self.multitask:
-            task1 = self.task1(merged)
-            task2 = self.task2(merged)
-            task3 = self.task3(merged)
-            return task1, task2, task3
+            task_outputs = {}
+            for k in self.tasks.keys():
+                task_outputs[k] = self.tasks[k].to(merged.device)(merged)
+            return task_outputs
         else:
             task1 = self.task1(merged)
             return task1
@@ -193,7 +174,7 @@ def train_model_multitask(model, dataloaders_dict, features, labels,
     
     # Initialize early stopping only if save_path is provided
     if save_path:
-        early_stopping = utils.EarlyStopping(path=save_path,
+        early_stopping = EarlyStopping(path=save_path,
                                              accuracy=monitor_accuracy,
                                              patience=50, verbose=True)
 
@@ -204,43 +185,62 @@ def train_model_multitask(model, dataloaders_dict, features, labels,
               f'Epoch {epoch + 1}/{num_epochs}')
         print('-' * 60)
 
-        for phase in ['train', 'val']:
+        for phase in ['train', 'val', 'test']:
             if phase == 'train':
                 model.train()
             else:
                 model.eval()
             
             running_loss = 0.0
-            task1_corrects = 0
-            task2_corrects = 0
-            task3_corrects = 0
+           
+            losses = {}
+            if task_type == 'retrieval':
+                outputs = {}
+                targets = {}
+                recalls = {}
+            else:
+                accuracies = {}
+                tasks_corrects = {}
             
+
+            for value in task_names:
+                losses[value] = 0
+                
+                if task_type == 'retrieval':
+                    outputs[value] = []
+                    targets[value] = []
+                    recalls[value] = {'1': 0, '5': 0, '10': 0}
+                else:
+                    tasks_corrects[value] = 0
+                    accuracies[value] = 0
+                
+
             # Iterate over batches
             for batch_size, n_id, imgs, adjs in tqdm(dataloaders_dict[phase]):
                 adjs = [adj.to(device) for adj in adjs]
                 optimizer.zero_grad()
-                
+                #print(batch_size, len(adjs), len(n_id), 'n_id length', torch.stack(imgs).shape, 'imgs shape', adjs[0].edge_index.shape, 'adj edge_index shape')
                 # Forward pass
                 with torch.set_grad_enabled(phase == 'train'):
                     out = model(torch.stack(imgs).to(device),
                                 features[n_id], adjs)
                     
-                    loss1 = criterion[0](out[0], labels[0][n_id[:batch_size]])
-                    loss2 = criterion[1](out[1], labels[1][n_id[:batch_size]])
+                    for i, value in enumerate(task_names):
+                        #print(out[value].flatten().shape, 'out value', out[value].shape, labels[i][n_id[:batch_size]].float().shape)
+                        
+                        if task_type == 'classification':
+                            losses[value] = criterion[i](out[value], labels[i][n_id[:batch_size]])
+                        else:
                     
-                    if task_type == 'classification':
-                        loss3 = criterion[2](out[2], labels[-1][n_id[:batch_size]])
-                    else:
-                        preds = out[2]
-                        if preds.dim() > 1:
-                            preds = preds.squeeze(-1)
+                            tgt = labels[i][n_id[:batch_size]].float()     # (B, C) one-hot, ignored rows are all-zero
+                            per_elem = criterion[i](out[value], tgt)       # (B, C) because reduction='none'
+                            per_sample = per_elem.mean(dim=1)              # (B,)
+                            # valid samples are those not ignored -> one-hot rows sum to 1
+                            valid = (tgt.sum(dim=1) > 0).float()           # (B,)
 
-                        loss3 = criterion[2](
-                            preds,
-                            labels[-1][n_id[:batch_size]].float()
-                        )
-                    
-                    loss = loss1 + loss2 + loss3
+                            losses[value] = (per_sample * valid).sum() / valid.sum().clamp_min(1.0)
+
+                    loss = sum(list(losses.values()))
                     
                     # Backward pass
                     if phase == 'train':
@@ -249,29 +249,42 @@ def train_model_multitask(model, dataloaders_dict, features, labels,
                 
                 # Accumulate metrics
                 running_loss += loss.item() * batch_size
-                task1_corrects += torch.sum(torch.max(out[0], 1)[1] 
-                                            == labels[0][n_id[:batch_size]])
-                task2_corrects += torch.sum(torch.max(out[1], 1)[1] 
-                                            == labels[1][n_id[:batch_size]])
-                
-                if task_type == 'classification':
-                    task3_corrects += torch.sum(torch.max(out[-1], 1)[1]
-                                                == labels[-1][n_id[:batch_size]])
-                else:
-                    preds = out[2]
 
-                    if preds.dim() > 1:
-                        preds = preds.squeeze(-1)   # (N,)
+                for i, value in enumerate(task_names):
+                    if task_type == 'classification':
+                        tasks_corrects[value] += torch.sum(torch.max(out[value], 1)[1] 
+                                                        == labels[i][n_id[:batch_size]])
+                    else:
+                        tgt = labels[i][n_id[:batch_size]].detach().cpu()          # (B, C) multi-hot/one-hot
+                        outb = out[value].sigmoid().detach().cpu()                # (B, C)
+                        valid = (tgt.sum(dim=1) > 0)                              # (B,) ignore rows
+                        tgt = tgt[valid]
+                        outb = outb[valid]
 
-                    task3_corrects += torch.sum(
-                        torch.abs(preds - labels[-1][n_id[:batch_size]].float()) <= regression_threshold
-                    )
-                    
+                        # append per-sample to keep stacking consistent
+                        targets[value].extend(list(tgt))
+                        outputs[value].extend(list(outb))
+
             epoch_loss = running_loss / dataset_sizes[phase]
-            task1_acc = task1_corrects.double() / dataset_sizes[phase]
-            task2_acc = task2_corrects.double() / dataset_sizes[phase]
-            task3_acc = task3_corrects.double() / dataset_sizes[phase]
-            epoch_acc = (task1_acc + task2_acc + task3_acc) / 3
+
+            for i, value in enumerate(task_names):
+                
+                if task_type == 'retrieval':
+                    outputs_ = torch.stack(outputs[value]).detach().numpy()
+                    targets_ = torch.stack(targets[value]).detach().numpy()
+                    
+                    recalls[value]['1'] = recall_at_k(targets_, outputs_, k=1)
+                    recalls[value]['5'] = recall_at_k(targets_, outputs_, k=5)
+                    recalls[value]['10'] = recall_at_k(targets_, outputs_, k=10)
+                else:
+                    accuracies[value] = tasks_corrects[value].double() / dataset_sizes[phase]
+        
+            if task_type == 'retrieval':
+                epoch_acc = sum([recalls[k]['10'] for k in recalls.keys()]) / len(recalls)
+            else:    
+                epoch_acc = sum(list(accuracies.values())) / len(accuracies)
+            
+            task_metric = accuracies if task_type != 'retrieval' else recalls
             
             # Handle validation phase
             if phase == 'val':
@@ -294,16 +307,18 @@ def train_model_multitask(model, dataloaders_dict, features, labels,
                 else:
                     scheduler.step(epoch_loss if not monitor_accuracy else epoch_acc)
             
-            print(f'[{datetime.now().strftime("%d/%m/%Y %H:%M:%S")}] '
-                  f'{phase.capitalize()} Loss: {epoch_loss:.4f}, '
-                  f'{task_names[0]} Acc: {task1_acc:.4f}, '
-                  f'{task_names[1]} Acc: {task2_acc:.4f}, '
-                  f'{task_names[2]} Acc: {task3_acc:.4f}')
-
+            print(f'[{datetime.now().strftime("%d/%m/%Y %H:%M:%S")}] ',
+                  f'{phase.capitalize()} Loss: {epoch_loss:.4f}', 
+                  task_metric)
             # Save best model
-            if phase == 'val' and task1_acc > best_metric:
-                best_metric = task1_acc
-                best_model_wts = copy.deepcopy(model.state_dict())
+            if task_type == 'retrieval':
+                if phase == 'val' and sum([recalls[k]['10'] for k in recalls.keys()]) > best_metric:
+                    best_metric = sum([recalls[k]['10'] for k in recalls.keys()])
+                    best_model_wts = copy.deepcopy(model.state_dict())
+            else:   
+                if phase == 'val' and sum(list(accuracies.values())) > best_metric:
+                    best_metric = sum(list(accuracies.values()))
+                    best_model_wts = copy.deepcopy(model.state_dict())
 
 
     time_elapsed = datetime.now() - since
@@ -314,102 +329,18 @@ def train_model_multitask(model, dataloaders_dict, features, labels,
 
     # Load best model weights
     model.load_state_dict(best_model_wts)
+    torch.save(best_model_wts, 'checkpoints/sagenet_weights.pth')
     return model, epoch_loss, epoch
 
 
-def test_model_multitask(model, dataloaders_dict, features, labels,
-                          dataset_sizes, criterion, task_type='classification',
-                          regression_threshold=0.03355705,
-                          task_names=None,
-                          device=torch.device('cpu')):
-    """
-    Evaluate a multi-task ArtSAGENet model on the test set.
-    
-    Args:
-        model (nn.Module): Trained ArtSAGENet model (with multitask=True)
-        dataloaders_dict (dict): Dictionary with 'test' dataloader
-        features (torch.Tensor): Node features for all nodes
-        labels (list): List of [task1_labels, task2_labels, task3_labels]
-        dataset_sizes (dict): Dictionary with dataset sizes
-        criterion (list): List of loss functions for each task
-        task_type (str): Type of third task ('classification' or 'regression')
-        regression_threshold (float): Threshold for regression accuracy
-        task_names (list, optional): Names for the three tasks.
-            Default: ['Task1', 'Task2', 'Task3']
-        device (torch.device): Device to run evaluation on
-        
-    Returns:
-        tuple: (model, test_loss, task1_acc, task2_acc, task3_acc)
-    """
-    if task_names is None:
-        task_names = ['Task1', 'Task2', 'Task3']
-    
-    since = datetime.now()
-    print(f'[{datetime.now().strftime("%d/%m/%Y %H:%M:%S")}] Evaluating on test set...')
-    
-    model.eval()
-    running_loss = 0.0
-    task1_corrects = 0
-    task2_corrects = 0
-    task3_corrects = 0
-    
-    # Iterate over test batches
-    for batch_size, n_id, imgs, adjs in dataloaders_dict['test']:
-        adjs = [adj.to(device) for adj in adjs]
-        
-        # Forward pass
-        with torch.no_grad():
-            out = model(torch.stack(imgs).to(device), features[n_id], adjs)
-            
-            loss1 = criterion[0](out[0], labels[0][n_id[:batch_size]])
-            loss2 = criterion[1](out[1], labels[1][n_id[:batch_size]])
-            
-            if task_type == 'classification':
-                loss3 = criterion[2](out[2], labels[-1][n_id[:batch_size]])
-            else:
-                loss3 = criterion[2](out[2].flatten(),
-                                     labels[-1][n_id[:batch_size]].float())
-            
-            loss = loss1 + loss2 + loss3
-            
-        running_loss += loss.item() * batch_size
-        task1_corrects += torch.sum(torch.max(out[0], 1)[1] 
-                                    == labels[0][n_id[:batch_size]])
-        task2_corrects += torch.sum(torch.max(out[1], 1)[1] 
-                                    == labels[1][n_id[:batch_size]])
-        
-        if task_type == 'classification':
-            task3_corrects += torch.sum(torch.max(out[-1], 1)[1]
-                                        == labels[-1][n_id[:batch_size]])
-        else:
-            task3_corrects += torch.sum(torch.abs(out[2].flatten()
-                 - labels[-1][n_id[:batch_size]].float()) <= regression_threshold)
-                
-    test_loss = running_loss / dataset_sizes['test']
-    task1_acc = task1_corrects.double() / dataset_sizes['test']
-    task2_acc = task2_corrects.double() / dataset_sizes['test']
-    task3_acc = task3_corrects.double() / dataset_sizes['test']
-    
-    print(f'[{datetime.now().strftime("%d/%m/%Y %H:%M:%S")}] '
-          f'Test Loss: {test_loss:.4f}, '
-          f'{task_names[0]} Acc: {task1_acc:.4f}, '
-          f'{task_names[1]} Acc: {task2_acc:.4f}, '
-          f'{task_names[2]} Acc: {task3_acc:.4f}')
-
-    time_elapsed = datetime.now() - since
-    print(f'[{datetime.now().strftime("%d/%m/%Y %H:%M:%S")}] '
-          f'Testing complete in {time_elapsed.seconds // 60}m '
-          f'{time_elapsed.seconds % 60}s')
-    
-    return model, test_loss, task1_acc, task2_acc, task3_acc
-
-
-IGNORE_INDEX = -100
-
-TASKS = ["author", "school", "genre", "timeframe", "material"]          # 5 heads
-EDGE_LINKS = ["author", "school", "genre", "timeframe", "material"]  # for building graph
-
 def main(dataset_root, dataset_name, num_epochs, task_type):
+    if task_type == 'classification':
+        TASKS = ["author", "school", "genre", "timeframe", "material"]          
+    else:
+        TASKS = ['content', 'context', 'description', 'form'] 
+    
+    EDGE_LINKS = TASKS
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     train_entries = load_json(os.path.join(dataset_root, dataset_name, f"triplets_{dataset_name.lower()}_train.json"))
@@ -425,6 +356,8 @@ def main(dataset_root, dataset_name, num_epochs, task_type):
     list_paths = [os.path.join(dataset_root, dataset_name, p) for p in artworks]
 
     labels_list, out_channels, label2idx = build_labels(entries_all, art2id, TASKS, IGNORE_INDEX)
+    #print([len(l.unique()) for l in labels_list], 'labels list lengths')
+    print(out_channels, 'out channels per task')
     edge_index = build_edge_index(entries_all, art2id, EDGE_LINKS)
 
     # node_idx splits (node ids belonging to each split)
@@ -441,11 +374,15 @@ def main(dataset_root, dataset_name, num_epochs, task_type):
     print('Precomputing node features from ResNet34...')
     # precompute node features (512-d) from frozen ResNet34
     # features = precompute_resnet34_features(list_paths, device=device)  # [N,512]
-    # save features for future loading .pkl
-    # torch.save(features, os.path.join(dataset_root, dataset_name, "resnet34_features.pt"))
+    # # save features for future loading .pkl
+    # torch.save(features, os.path.join(dataset_root, dataset_name, "resnet34_features_retrieval.pt"))
     
     # load saved features
-    features = torch.load(os.path.join(dataset_root, dataset_name, "resnet34_features.pt"))
+    if task_type == 'retrieval':
+        features = torch.load(os.path.join(dataset_root, dataset_name, "resnet34_features_retrieval.pt"))
+    else:
+        features = torch.load(os.path.join(dataset_root, dataset_name, "resnet34_features.pt"))
+        
     if features.dim() == 3 and features.size(1) == 1:
         features = features.squeeze(1)   # [N, 512]
 
@@ -456,30 +393,49 @@ def main(dataset_root, dataset_name, num_epochs, task_type):
         transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]),
     ])
 
-    sizes = [10, 10]  # neighbor sampling (tune)
-    train_loader = NeighborSamplerImages(list_paths, img_transform, edge_index, sizes,
-                                         node_idx=train_idx, batch_size=16, shuffle=True, num_workers=4)
-    val_loader   = NeighborSamplerImages(list_paths, img_transform, edge_index, sizes,
-                                         node_idx=val_idx, batch_size=16, shuffle=False, num_workers=4)
-    test_loader  = NeighborSamplerImages(list_paths, img_transform, edge_index, sizes,
-                                         node_idx=test_idx, batch_size=16, shuffle=False, num_workers=4)
-
-    dataloaders = {"train": train_loader, "val": val_loader, "test": test_loader}
     dataset_sizes = {"train": len(train_idx), "val": len(val_idx), "test": len(test_idx)}
+    sizes = [50, 50]  # neighbor sampling (tune)
+    train_loader = NeighborSamplerImages(list_paths, img_transform, edge_index, sizes,
+                                         node_idx=train_idx, batch_size=256, shuffle=True, num_workers=4, num_nodes = len(list_paths))
+    val_loader   = NeighborSamplerImages(list_paths, img_transform, edge_index, sizes,
+                                         node_idx=val_idx, batch_size=256, shuffle=False, num_workers=4, num_nodes = len(list_paths))
+    test_loader  = NeighborSamplerImages(list_paths, img_transform, edge_index, sizes,
+                                         node_idx=test_idx, batch_size=dataset_sizes['test'], shuffle=False, num_workers=4, num_nodes = len(list_paths))
+    dataloaders = {"train": train_loader, "val": val_loader, "test": test_loader}
     print(f"Dataset sizes: {dataset_sizes}, next iter size train: {next(iter(train_loader))[1].shape}")
     
+
     # model: in_channels=512, hidden_channels=512, out_channels list of 5
     model = ArtSAGENet(in_channels=512, hidden_channels=512, out_channels=out_channels,
                        dropout=0.5, fine_tune=False,
-                       merge="concatenate", multitask=True, task_type=task_type).to(device)
+                       merge="concatenate", multitask=True, task_type=task_type,
+                       task_names = TASKS).to(device)
 
     # criteria: 5x CrossEntropy
-    crit = [nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX) for _ in range(len(TASKS))]
+    if task_type == 'classification':
+        crit = [nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX) for _ in range(len(TASKS))]
+    else:
+        crit = [nn.BCEWithLogitsLoss(reduction='none') for _ in range(len(TASKS))]
+
+    
     opt = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-3)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", patience=5)
 
     # move labels to device once
-    labels_list = [y.to(device) for y in labels_list]
+    if task_type == 'classification':
+        labels_list = [y.to(device) for y in labels_list]
+    else:
+        labels_list = [
+            (lambda y, C: (
+                (lambda yy, mask: (
+                    (lambda t: (t.__setitem__(mask, F.one_hot(yy[mask].long(), num_classes=C).float()) or t))
+                    (torch.zeros((yy.size(0), C), device=device, dtype=torch.float32))
+                ))(y.to(device), (y.to(device) != IGNORE_INDEX))
+            ))(labels_list[i], out_channels[i])
+            for i in range(len(labels_list))
+        ]
+
+        
     features = features.to(device)
     
     print(labels_list[0].shape, 'labels shape example', labels_list[0][:10])
@@ -502,17 +458,6 @@ def main(dataset_root, dataset_name, num_epochs, task_type):
         save_path=None
     )
 
-    test_model_multitask(
-        model=model,
-        dataloaders_dict=dataloaders,
-        features=features,
-        labels=labels_list,
-        dataset_sizes=dataset_sizes,
-        criterion=crit,
-        task_type=task_type,
-        task_names=TASKS,
-        device=device
-    )
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

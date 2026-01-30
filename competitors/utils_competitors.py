@@ -13,6 +13,53 @@ from collections import defaultdict
 from typing import List, Optional, Tuple, NamedTuple
 from PIL import Image
 import json
+from torchvision import transforms
+from tqdm import tqdm
+
+# def recall_at_k(y_true, y_score, k):
+#     """
+#     y_true: binary array (1 = relevant, 0 = not relevant)
+#     y_score: predicted scores or probabilities
+#     """
+#     top_k_idx = np.argsort(y_score)[-k:]
+#     return y_true[top_k_idx].sum() / y_true.sum()
+import numpy as np
+
+def recall_at_k(y_true, y_score, k=10):
+    """
+    Batch-level (micro) Recall@k for multi-label/one-hot targets.
+
+    y_true: (N, C) binary 0/1
+    y_score: (N, C) scores (logits/probabilities)
+    """
+    y_true = np.asarray(y_true)
+    y_score = np.asarray(y_score)
+
+    assert y_true.ndim == 2 and y_score.ndim == 2, (y_true.shape, y_score.shape)
+    assert y_true.shape == y_score.shape, (y_true.shape, y_score.shape)
+
+    N, C = y_true.shape
+    k = min(k, C)
+
+    # ignore rows with no positives (e.g. ignored task rows)
+    denom_per_row = y_true.sum(axis=1)        # (N,)
+    valid = denom_per_row > 0
+    if valid.sum() == 0:
+        return 0.0
+
+    y_true_v = y_true[valid]
+    y_score_v = y_score[valid]
+
+    # top-k indices per row (over classes)
+    topk_idx = np.argpartition(-y_score_v, kth=k-1, axis=1)[:, :k]  # (Nv, k)
+
+    # hits per row: how many true labels were retrieved in top-k
+    hits_per_row = np.take_along_axis(y_true_v, topk_idx, axis=1).sum(axis=1)  # (Nv,)
+
+    # MICRO aggregation across the batch:
+    hits = hits_per_row.sum()
+    denom = y_true_v.sum()
+    return float(hits / denom) if denom > 0 else 0.0
 
 class Adj(NamedTuple):
     edge_index: torch.Tensor
@@ -126,6 +173,8 @@ def _sample_adj_csr(rowptr: torch.Tensor,
     eid_ = torch.cat(eids, dim=0)
 
     n_id_out = _order_preserving_unique(torch.cat([seeds, col_], dim=0))
+    # print("CSR rowptr size:", rowptr.size(0), "max requested u:", int(n_id_out.max()))
+
     return row, col_, eid_, n_id_out
 
 
