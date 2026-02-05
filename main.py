@@ -16,7 +16,7 @@ from src.model_loss import *
 from src.utils import *
 
 def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_size:int=1,
-         base_folder: str = "../wikidata_arthist/",
+         base_folder: str = "data",
          checkpoint_name=None, sweep_config=None,
          dataset_name:str="SemArt"):
     """
@@ -35,7 +35,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     _,_, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     
     # Training data
-    train_data_list = load_json_data(train_path)#[:5000]
+    train_data_list = load_json_data(train_path)[:5000]
     train_graph_data, train_node_to_id, train_edge_labels = build_graph_from_json(train_data_list, preprocess, tokenizer,
                                                                                   base_folder=base_folder,
                                                                                   dataset_name=dataset_name)
@@ -43,7 +43,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     print("Loaded training data with {} nodes.".format(len(train_node_to_id.keys())))
     
     # Validation data
-    val_data_list = load_json_data(val_path)#[:1000]
+    val_data_list = load_json_data(val_path)[:1000]
     val_graph_data, val_node_to_id, val_edge_labels = build_graph_from_json(val_data_list, preprocess, tokenizer,
                                                                             base_folder=base_folder,
                                                                             dataset_name=dataset_name)
@@ -61,10 +61,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
             num_layers=args.sheaf_layers,
             step_size=args.step_size,
             lr=args.lr,
-            w_clip = 0.1,
-            w_mask = 0.9,
-            w_reg = 0,
-            device=device,
+            w_clip_vs_mask = 0.1,
             verbose=False,
             clip_grad=True,
         )
@@ -74,19 +71,33 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
         run = wandb.init()
         configuration = wandb.config
         configuration = obtain_configuration(wandb.config, args)
-        model = SheafMultimodalGNN(
-            latent_dim=configuration['latent_dim'],
-            edge_attr_dim=configuration['latent_dim'],
-            num_layers=configuration['sheaf_layers'],
-            step_size=configuration['step_size'],
-            lr=configuration['lr'],
-            w_clip = 1,
-            w_mask = 1,
-            w_reg = 0,
-            device=device,
-            verbose=False,
-        )
+        print("Configuration:", configuration)
+        batch_size = configuration.get('batch_size', 512)
         epochs = configuration['epochs']
+        
+        # make config without batch_size into args passed to the model
+        config = {k: v for k, v in configuration.items() if k not in ['batch_size', 'epochs', 
+                                                                      'sweep', 'dataset']}
+        config['device'] = device
+        config['verbose'] = False
+        config['edge_attr_dim'] = configuration['latent_dim']
+        
+        model = SheafMultimodalGNN(
+            # latent_dim=configuration['latent_dim'],
+            # edge_attr_dim=configuration['latent_dim'],
+            # num_finetune_layers=configuration['finetune_layers'],
+            # num_layers=configuration['sheaf_layers'],
+            # step_size=configuration['step_size'],
+            # lr=configuration['lr'],
+            # alpha =configuration['alpha'],
+            # weights_components = configuration['weights_components'],
+            # weights_kl_vs_clip = configuration['weights_kl_vs_clip'],
+            # w_clip_vs_mask = configuration['w_clip_vs_mask'],
+            # device=device,
+            # verbose=False,
+            **config
+        )
+        
     
     if checkpoint_name:
         checkpoint = torch.load(f"checkpoints/{checkpoint_name}", map_location=device)
@@ -175,7 +186,7 @@ if __name__ == "__main__":
     )
     
     parser.add_argument(
-        "--sheaf_layers",
+        "--num_layers",
         type=int,
         default=3,
         help="Number of sheaf layers",
@@ -190,7 +201,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset",
         type=str,
-        default="Hertziana",
+        default="SemArt",
         choices=["SemArt", "Hertziana"],
         help="Name of the dataset.",
     )

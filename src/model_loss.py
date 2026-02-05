@@ -98,9 +98,12 @@ class SheafMultimodalGNN(pl.LightningModule):
         step_size: float = 1.0,
         lr: float = 1e-3,
         device: str = 'cpu',
-        w_clip: float = 1.0,
-        w_mask: float = 0,
-        w_reg: float = 0,
+        alpha: float = 1.7,
+        weights_components: float = 0.7,
+        weights_kl_vs_clip: float = 0.75,
+        finetune_layers: int = 5,
+        w_clip_vs_mask: float = 1.0,
+        # w_reg: float = 0,
         clip_grad=True,
         test=False,
         verbose=True,
@@ -114,12 +117,13 @@ class SheafMultimodalGNN(pl.LightningModule):
         self._device = device
         self.test = test
         self.num_nodes = None
-        
-        self.w_clip = w_clip
-        self.w_mask = w_mask
-        self.w_reg = w_reg
+        self.alpha = alpha
+        self.weights_components = weights_components
+        self.weights_kl_vs_clip = weights_kl_vs_clip
 
-        self.init_clip(clip_grad)
+        self.w_clip_vs_mask = w_clip_vs_mask
+        
+        self.init_clip(clip_grad, finetune_layers=finetune_layers)
         
         self.input_proj_text = nn.Linear(self.latent_dim, latent_dim)
         self.input_proj_image = nn.Linear(self.latent_dim, latent_dim)
@@ -150,7 +154,7 @@ class SheafMultimodalGNN(pl.LightningModule):
     #    fingerprint = tokenizer.decode(rel.cpu().numpy()).strip('!').replace('<|startoftext|>', '').replace('<|endoftext|>', '' ).replace('paragraph ', '' ).replace(' en', '' ).strip()
             
     
-    def init_clip(self, clip_grad):
+    def init_clip(self, clip_grad, finetune_layers=5):
         self.clip_model, _, _ = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
         self.clip_model = self.clip_model.to(self._device)
         
@@ -161,12 +165,12 @@ class SheafMultimodalGNN(pl.LightningModule):
         self.clip_model.text_projection.requires_grad = True
         
         # vision tower
-        for block in list(self.clip_model.visual.transformer.resblocks)[-3:]:
+        for block in list(self.clip_model.visual.transformer.resblocks)[-finetune_layers:]:
             for p in block.parameters():
                 p.requires_grad = clip_grad
         
         # text tower
-        for block in list(self.clip_model.transformer.resblocks)[-3:]:
+        for block in list(self.clip_model.transformer.resblocks)[-finetune_layers:]:
             for p in block.parameters():
                 p.requires_grad = clip_grad
         
@@ -305,9 +309,8 @@ class SheafMultimodalGNN(pl.LightningModule):
         
         W = self.laplacian_heat_kernel(LG, tau=0.7, device=img_emb.device)
 
-        alpha = 1.7
         eps = 1e-8
-        weights = (W.clamp(min=0) ** alpha)
+        weights = (W.clamp(min=0) ** self.alpha)
         weights = weights / (weights.sum(dim=1, keepdim=True) + eps)
         
         # W = torch.exp(-D)      # soft decay
@@ -325,20 +328,21 @@ class SheafMultimodalGNN(pl.LightningModule):
         
         labels = torch.eye(weights.shape[0], device=img_emb.device)
         
-        p = 0.7 * weights + 0.3 * labels
+        p = self.weights_components * weights + (1 - self.weights_components) * labels
         p = p / p.sum(dim=1, keepdim=True)
 
-        p_t = 0.7 * weights.T + 0.3 * labels
+        p_t = self.weights_components * weights.T + (1 - self.weights_components) * labels
         p_t = p_t / p_t.sum(dim=1, keepdim=True)
-        
         
         # loss_clip_init = graph_clip_loss(img_emb, txt_emb, weights)
         # print(loss_clip_graph.item(), 'graph clip loss')
         loss_clip_init = clip_loss(img_emb, txt_emb)
-        print(loss_clip_init.item(), 'initial clip loss')
         loss_kl = (compute_KL_loss(p, sim_matrix_it)  + compute_KL_loss(p_t, sim_matrix_ti)) / 2
-        print(loss_kl.item(), 'kl loss')
-        loss_clip_init = 0.5 * loss_clip_init + 1 * loss_kl
+        if self.convs[0].verbose:
+            print(loss_kl.item(), 'kl loss')
+            print(loss_clip_init.item(), 'initial clip loss')
+            
+        loss_clip_init = (1 - self.weights_kl_vs_clip) * loss_clip_init + self.weights_kl_vs_clip * loss_kl
 
         metrics_i2t = compute_clip_metrics(img_emb, txt_emb)
         metrics_t2i = compute_clip_metrics(txt_emb, img_emb)
@@ -370,25 +374,26 @@ class SheafMultimodalGNN(pl.LightningModule):
             sim_matrix_ti_split = txt_emb_rel @ img_emb_rel.T
             
             W_rel = W[rel_mask][:, rel_mask]
-            alpha = 1.7  # >1 makes distribution more peaked
+            alpha = self.alpha  # >1 makes distribution more peaked
             weights_rel = (W_rel.clamp(min=0) ** alpha)
             eps = 1e-8
             weights_rel = weights_rel / (weights_rel.sum(dim=1, keepdim=True) + eps)
             
             labels = torch.eye(weights_rel.shape[0], device=img_emb.device)
         
-            p = 0.7 * weights_rel + 0.3 * labels
+            p = self.weights_components * weights_rel + (1 - self.weights_components) * labels
             p = p / p.sum(dim=1, keepdim=True)
 
-            p_t = 0.7 * weights_rel.T + 0.3 * labels
+            p_t = self.weights_components * weights_rel.T + (1 - self.weights_components) * labels
             p_t = p_t / p_t.sum(dim=1, keepdim=True)
             
             # loss_split = graph_clip_loss(img_emb_rel, txt_emb_rel, weights_rel)
             loss_clip_split = clip_loss(img_emb_rel, txt_emb_rel)
-            print(loss_clip_split.item(), 'initial clip loss split')
             loss_kl_split = (compute_KL_loss(p, sim_matrix_it_split)  + compute_KL_loss(p_t, sim_matrix_ti_split)) / 2
-            print(loss_kl_split.item(), 'kl loss split')
-            loss_split = 0.5 * loss_clip_init + 1 * loss_kl_split
+            if self.convs[0].verbose:
+                print(loss_clip_split.item(), 'initial clip loss split')
+                print(loss_kl_split.item(), 'kl loss split')
+            loss_split = (1 - self.weights_kl_vs_clip) * loss_clip_split + self.weights_kl_vs_clip * loss_kl_split
 
             loss_clip += loss_split * (img_emb_rel.size(0) / img_emb.size(0))
         
@@ -405,35 +410,35 @@ class SheafMultimodalGNN(pl.LightningModule):
                 self.log(f'{split}_rel_{fingerprint}_t2i_{name}', value, prog_bar=False, on_epoch=True, on_step=False)
         
         # regularization_loss distance between different embeddings of same image
-        reg_loss = 0
-        loss_elts = 0
-        # group img_emb based on orig ids from edge_index
-        imgs_ids = edge_index[0]
-        for img_id in torch.unique(imgs_ids):
-            img_mask = (imgs_ids == img_id)
-            img_emb_group = img_emb[img_mask]
-            # uniformity of group of embeddings
-            if img_emb_group.shape[0] > 1:
-                centroid = img_emb_group.mean(dim=0, keepdim=True)
-                # Mean squared distance from centroid
-                loss = ((img_emb_group - centroid) ** 2).sum(dim=1).mean()
-                reg_loss += loss
-                loss_elts += 1
+        # reg_loss = 0
+        # loss_elts = 0
+        # # group img_emb based on orig ids from edge_index
+        # imgs_ids = edge_index[0]
+        # for img_id in torch.unique(imgs_ids):
+        #     img_mask = (imgs_ids == img_id)
+        #     img_emb_group = img_emb[img_mask]
+        #     # uniformity of group of embeddings
+        #     if img_emb_group.shape[0] > 1:
+        #         centroid = img_emb_group.mean(dim=0, keepdim=True)
+        #         # Mean squared distance from centroid
+        #         loss = ((img_emb_group - centroid) ** 2).sum(dim=1).mean()
+        #         reg_loss += loss
+        #         loss_elts += 1
 
-        txt_ids = edge_index[1]
-        for txt_id in torch.unique(txt_ids):
-            txt_mask = (txt_ids == txt_id)
-            txt_emb_group = txt_emb[txt_mask]
-            if txt_emb_group.shape[0] > 1:
-                centroid = txt_emb_group.mean(dim=0, keepdim=True)
-                # Mean squared distance from centroid
-                loss = ((txt_emb_group - centroid) ** 2).sum(dim=1).mean()
-                reg_loss += loss
-                loss_elts += 1
+        # txt_ids = edge_index[1]
+        # for txt_id in torch.unique(txt_ids):
+        #     txt_mask = (txt_ids == txt_id)
+        #     txt_emb_group = txt_emb[txt_mask]
+        #     if txt_emb_group.shape[0] > 1:
+        #         centroid = txt_emb_group.mean(dim=0, keepdim=True)
+        #         # Mean squared distance from centroid
+        #         loss = ((txt_emb_group - centroid) ** 2).sum(dim=1).mean()
+        #         reg_loss += loss
+        #         loss_elts += 1
 
-        reg_loss = reg_loss / loss_elts if loss_elts > 0 else 0.0  
+        # reg_loss = reg_loss / loss_elts if loss_elts > 0 else 0.0  
         
-        loss = self.w_mask * loss_clip + self.w_clip * loss_clip_init + self.w_reg * reg_loss
+        loss = (1 - self.w_clip_vs_mask) * loss_clip + self.w_clip_vs_mask * loss_clip_init #+ self.w_reg * reg_loss
 
         alignment_embeddings = alignment(img_emb, txt_emb)
 
@@ -449,7 +454,7 @@ class SheafMultimodalGNN(pl.LightningModule):
             self.log(f'{split}_{key}', value, prog_bar=True, on_epoch=True, on_step=False,)
 
         self.log(f'{split}_loss', loss, prog_bar=True, on_epoch=True, on_step=False)
-        self.log(f'{split}_reg', reg_loss, prog_bar=True, on_epoch=True, on_step=False)
+        # self.log(f'{split}_reg', reg_loss, prog_bar=True, on_epoch=True, on_step=False)
         self.log(f'{split}_masked', loss_clip, prog_bar=True, on_epoch=True, on_step=False)
         self.log(f'{split}_clip', loss_clip_init, prog_bar=True, on_epoch=True, on_step=False)
 
@@ -521,8 +526,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         out_img = F.normalize(out_img, dim=1)
         out_txt = F.normalize(out_txt, dim=1)
         return out_img, out_txt
-    
-    
+        
     def validation_step(self, batch: tuple, batch_idx: int) -> dict:
         """
         Validation step to evaluate model performance on validation data.
