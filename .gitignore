@@ -5,3 +5,4 @@ lightning_logs/
 figures/
 checkpoints/
 test_images/
+wandb/

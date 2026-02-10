@@ -4,6 +4,84 @@ import torch.nn.functional as F
 import open_clip
 import numpy as np 
 
+def compute_test_metrics(img_emb, txt_emb, data_list, verbose=False, img_path='/Users/ludovicaschaerf/Desktop/Sheaf_Art/SemArt/images/'):
+    
+    results = {}
+    
+    adj_matrix, img_to_idx, txt_to_idx = make_adj_matrix(data_list) 
+    # print(f"Adjacency matrix shape: {adj_matrix.shape}")
+    sim_matrix = get_sim_matrix([t["item1"] + t["link"] for t in data_list], 
+                                [t["item2"] + t["link"] for t in data_list], 
+                                img_emb, txt_emb,
+                                img_to_idx, txt_to_idx)
+    # print(f"Similarity matrix shape: {sim_matrix.shape}")
+
+    # extend results with more metrics
+    results.update(compute_bidirectional_metrics(torch.tensor(sim_matrix), torch.tensor(adj_matrix), k_values=[1, 5, 10], prefix="test_"))
+       
+    if verbose:
+        print('General metrics:')
+        recalls = [k for k in results.keys() if 'recall' in k and 'mean' not in k]
+        for rec in recalls:
+            print(rec, results[rec]) 
+        
+        recs = get_top_k_recommendations(torch.Tensor(sim_matrix), k=min(5, len(data_list)))
+
+        query_field = 'item1'  # image path
+        rec_field = 'item2'      # e.g., 'timeframe', 'author', etc.
+        idx_to_txt = {idx: txt for txt, idx in txt_to_idx.items()}
+        idx_to_img = {idx: img for img, idx in img_to_idx.items()}
+
+        for i, rec_indices in enumerate(recs[:5]):  # Show only first 5 for brevity
+            query = idx_to_img[i]
+            recommendations = [idx_to_txt[j] for j in rec_indices]
+            print(f"Query: {img_path + query}")
+            print(f"Ground Truth: {[loaded_it[rec_field] for loaded_it in data_list if loaded_it['item1'] + loaded_it['link'] == query]}")
+            print("Recommendations:")
+            for rec in recommendations:
+                print(f"  - {rec}")
+            print("-" * 40)  
+            
+    for typ in list(set([l['link'] for l in data_list])):
+        
+        loaded_data_new = [l for l in data_list if l['link'] == typ]
+        indices_new = [i for i, l in enumerate(data_list) if l['link'] == typ]
+        adj_matrix, img_to_idx, txt_to_idx = make_adj_matrix(loaded_data_new) 
+        
+        clip_imgs_n = img_emb[indices_new]
+        clip_txts_n = txt_emb[indices_new]
+        
+        sim_matrix = get_sim_matrix([t["item1"] + t["link"] for t in loaded_data_new], 
+                                    [t["item2"] + t["link"] for t in loaded_data_new], 
+                                    clip_imgs_n, clip_txts_n,
+                                    img_to_idx, txt_to_idx)
+        
+        results.update(compute_bidirectional_metrics(torch.tensor(sim_matrix), torch.tensor(adj_matrix), k_values=[1, 5, 10], prefix=f"test_{typ}_"))
+        
+        if verbose:
+            print(f"Processing type: {typ}")
+            recalls = [k for k in results.keys() if 'recall' in k and 'mean' not in k]
+            for rec in recalls:
+                print(rec, results[rec])
+       
+            recs = get_top_k_recommendations(torch.Tensor(sim_matrix), k=min(5, len(loaded_data_new)))
+            query_field = 'item1'  # image path
+            rec_field = 'item2'      # e.g., 'timeframe', 'author', etc.
+            idx_to_txt = {idx: txt for txt, idx in txt_to_idx.items()}
+            idx_to_img = {idx: img for img, idx in img_to_idx.items()}
+
+            for i, rec_indices in enumerate(recs[:5]):  # Show only first 5 for brevity
+                query = idx_to_img[i]
+                recommendations = [idx_to_txt[j] for j in rec_indices]
+                print(f"Query: {img_path + query}")
+                print(f"Ground Truth: {[loaded_it[rec_field] for loaded_it in loaded_data_new if loaded_it[query_field] + loaded_it['link'] == query]}")
+                print("Recommendations:")
+                for rec in recommendations:
+                    print(f"  - {rec}")
+                print("-" * 40)
+    
+    return results
+
 def compute_clip_metrics(src_emb, tgt_emb, topk=(1, 5, 10)):
     """
     Computes retrieval metrics from src_emb (e.g. text) to tgt_emb (e.g. image).
@@ -199,7 +277,8 @@ def compute_retrieval_metrics(sim_matrix: torch.Tensor, adj_matrix: torch.Tensor
 def compute_bidirectional_metrics(
                                 sim_matrix: torch.Tensor, 
                                 adj_matrix: torch.Tensor, 
-                                k_values: List[int]) -> Dict[str, torch.Tensor]:
+                                k_values: List[int], 
+                                prefix: str = "") -> Dict[str, torch.Tensor]:
     """
     Compute retrieval metrics in both directions (text→image and image→text).
     
@@ -220,16 +299,16 @@ def compute_bidirectional_metrics(
     # Combine metrics
     combined_metrics = {}
     for k, v in t2i_metrics.items():
-        combined_metrics[f't2i_{k}'] = v
+        combined_metrics[f'{prefix}t2i_{k}'] = v
     for k, v in i2t_metrics.items():
-        combined_metrics[f'i2t_{k}'] = v
+        combined_metrics[f'{prefix}i2t_{k}'] = v
         
     # Compute mean metrics
     for k in k_values:
         for metric in ['precision', 'recall', 'ndcg']:
-            t2i_value = combined_metrics[f't2i_{metric}@{k}']
-            i2t_value = combined_metrics[f'i2t_{metric}@{k}']
-            combined_metrics[f'mean_{metric}@{k}'] = (t2i_value + i2t_value) / 2
+            t2i_value = combined_metrics[f'{prefix}t2i_{metric}@{k}']
+            i2t_value = combined_metrics[f'{prefix}i2t_{metric}@{k}']
+            combined_metrics[f'{prefix}mean_{metric}@{k}'] = (t2i_value + i2t_value) / 2
     
     return combined_metrics
 

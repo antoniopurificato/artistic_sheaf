@@ -3,7 +3,4 @@ metric:
   goal: minimize
   name: val_loss
 parameters:
-  batch_size:
-    values: [512, 256, 61284]
 program: main.py
-num_attempts: 2187

@@ -10,10 +10,10 @@ import yaml
 import wandb
 from pytorch_lightning.loggers import WandbLogger
 
-
 from src.data import *
 from src.model_loss import *
 from src.utils import *
+from src.metrics import *
 
 def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_size:int=1,
          base_folder: str = "data",
@@ -50,30 +50,28 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     val_graph_data = val_graph_data.to(device)
     print("Loaded val data with {} nodes.".format(len(val_node_to_id.keys())))
 
-    # Prepare model parameters using training data
-    input_dim = (len(train_node_to_id))
     
     if not args.sweep:
         # Initialize the model
         model = SheafMultimodalGNN(
             latent_dim=args.latent_dim,
             edge_attr_dim=args.latent_dim,
-            num_layers=args.sheaf_layers,
+            sheaf_layers=args.sheaf_layers,
             step_size=args.step_size,
             lr=args.lr,
-            w_clip_vs_mask = 0.1,
             verbose=False,
             clip_grad=True,
         )
         epochs = args.epochs
         
     else:
+
         run = wandb.init()
         configuration = wandb.config
         configuration = obtain_configuration(wandb.config, args)
-        print("Configuration:", configuration)
-        batch_size = configuration.get('batch_size', 512)
+        batch_size = configuration['batch_size']
         epochs = configuration['epochs']
+
         
         # make config without batch_size into args passed to the model
         config = {k: v for k, v in configuration.items() if k not in ['batch_size', 'epochs', 
@@ -81,20 +79,9 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
         config['device'] = device
         config['verbose'] = False
         config['edge_attr_dim'] = configuration['latent_dim']
+        del config["params_sweep"]        
         
         model = SheafMultimodalGNN(
-            # latent_dim=configuration['latent_dim'],
-            # edge_attr_dim=configuration['latent_dim'],
-            # num_finetune_layers=configuration['finetune_layers'],
-            # num_layers=configuration['sheaf_layers'],
-            # step_size=configuration['step_size'],
-            # lr=configuration['lr'],
-            # alpha =configuration['alpha'],
-            # weights_components = configuration['weights_components'],
-            # weights_kl_vs_clip = configuration['weights_kl_vs_clip'],
-            # w_clip_vs_mask = configuration['w_clip_vs_mask'],
-            # device=device,
-            # verbose=False,
             **config
         )
         
@@ -102,8 +89,6 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     if checkpoint_name:
         checkpoint = torch.load(f"checkpoints/{checkpoint_name}", map_location=device)
         model.load_state_dict(checkpoint['state_dict'])
-        #model = model.to(device)
-        #model.eval()
         
     print("Creating data loaders...")
     train_graph_data.num_nodes = len(train_graph_data.x)
@@ -122,7 +107,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
         accelerator=device,
         devices=1, # Use 1 GPU if available
         callbacks=[
-            EarlyStopping(monitor='val_loss', patience=15),
+            EarlyStopping(monitor='val_loss', patience=5),
             ModelCheckpoint(
                 monitor='val_loss',
                 dirpath='checkpoints',
@@ -134,11 +119,33 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
         gradient_clip_val=1.0, gradient_clip_algorithm="norm"
     )
     
-    
-    # Train the model
+    # from torch.profiler import profile
+    # # Train the model
+    # with profile(activities=[torch.profiler.ProfilerActivity.CUDA], record_shapes=True) as prof:
     trainer.fit(model, train_loader, val_loader)
     
-  
+    test_path = os.path.join(data_folder, dataset_name, f"triplets_{dataset_name.lower()}_test.json")
+    test_data_list = load_json_data(test_path)
+    test_graph_data, test_node_to_id, test_edge_labels = build_graph_from_json(test_data_list, preprocess, tokenizer,
+                                                                           base_folder=base_folder,
+                                                                           dataset_name=dataset_name)
+    test_graph_data = test_graph_data.to(device)
+    print("Loaded test data with {} nodes.".format(len(test_node_to_id.keys())))
+    test_dataset = GraphEdgeDataset(test_graph_data, device=device)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    model.eval()
+    model.to(device)
+    img_embs, txt_embs = predict_embeddings(test_loader, model, device=device)
+    results = compute_test_metrics(img_embs, txt_embs, test_data_list, verbose=False, img_path='/Users/ludovicaschaerf/Desktop/Sheaf_Art/SemArt/images/')
+    
+    if args.sweep:
+        wandb.log(results)
+    else:
+        print("Test results:")
+        for key, value in results.items():
+            if 'recall' in key and 'mean' not in key:
+                print(f"{key}: {value}")
+            
     # For plotting, move data back to CPU
     if plot_graph:
         os.makedirs('figures', exist_ok=True)
@@ -165,6 +172,12 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--params_sweep",
+        type=str,
+        default="None"
+    )
+
+    parser.add_argument(
         "--batch_size",
         type=int,
         default=512,
@@ -186,7 +199,7 @@ if __name__ == "__main__":
     )
     
     parser.add_argument(
-        "--num_layers",
+        "--sheaf_layers",
         type=int,
         default=3,
         help="Number of sheaf layers",
@@ -220,8 +233,13 @@ if __name__ == "__main__":
              base_folder='data', sweep_config=args,
              dataset_name=args.dataset)
     else:
+        with open('params.yaml', 'r') as file:
+            base_config = yaml.safe_load(file)
         with open('sweep.yaml', 'r') as file:
             sweep_configuration = yaml.safe_load(file)
+        sweep_configuration['parameters'] = {}
+        sweep_configuration['parameters'][args.params_sweep] = base_config[args.params_sweep]
+        sweep_configuration['name'] = f"{args.params_sweep}"
         sweep_id = wandb.sweep(sweep=sweep_configuration, project="artistic_sheaf",
-                           entity='sapienza_am')
-        wandb.agent(sweep_id, function=lambda: main(), count=sweep_configuration['num_attempts'])
+                           entity='sapienza_am')#, name=args.params_sweep)
+        wandb.agent(sweep_id, function=lambda: main())

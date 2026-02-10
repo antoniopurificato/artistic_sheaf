@@ -155,6 +155,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         w_clip: float = 1.0,
         w_mask: float = 0,
         w_reg: float = 0,
+        optimizer:str = "Adam"
         clip_grad=True,
         test=False,
         verbose=True,
@@ -168,6 +169,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         self._device = device
         self.test = test
         self.num_nodes = None
+        self.optimizer_cls = getattr(torch.optim, optimizer)
         
         self.w_clip = w_clip
         self.w_mask = w_mask
@@ -524,4 +526,5 @@ class SheafMultimodalGNN(pl.LightningModule):
         Returns:
             torch.optim.Optimizer: Adam optimizer
         """
-        return torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()), lr=self.lr)
+        return self.optimizer_cls(filter(lambda p: p.requires_grad, self.parameters()), lr=self.lr)
+)

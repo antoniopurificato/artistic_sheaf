@@ -9,6 +9,35 @@ import numpy as np
 import argparse
 import os
 
+def predict_embeddings(test_loader, model, verbose=False, device='cpu'):
+
+    clip_images = []
+    clip_texts = []
+    for batch in test_loader:
+        with torch.no_grad():
+            x_img, x_text, edge_index, edge_attr = process_batch(batch, split='sheaf', check_images_=False)
+            x_img = x_img.to(device)
+            x_text = x_text.to(device)
+            edge_index = edge_index.to(device)
+            edge_attr = edge_attr.to(device)
+            
+            x_img, x_text = model(x_img, x_text, edge_index, edge_attr)
+            
+            clip_images.append(F.normalize(x_img, dim=1))
+            clip_texts.append(F.normalize(x_text, dim=1))
+            
+    clip_images = torch.cat(clip_images, dim=0)
+    clip_texts = torch.cat(clip_texts, dim=0)
+
+    if verbose:
+        print(f"Extracted {len(clip_texts)} text embeddings, each of shape {clip_texts[0].shape}")
+        print(f"Extracted {len(clip_images)} image embeddings, each of shape {clip_images[0].shape}")
+
+    clip_images = clip_images.cpu().detach().numpy()
+    clip_texts = clip_texts.cpu().detach().numpy()
+    
+    return clip_images, clip_texts
+            
 def str2bool(v):
         if isinstance(v, bool):
             return v
@@ -21,10 +50,11 @@ def str2bool(v):
         raise argparse.ArgumentTypeError('Boolean value expected.')
     
 def obtain_configuration(wandb_config, default_config):
-    wandb_dict = vars(wandb_config)
-    default_dict = vars(default_config)
-    return {param: wandb_dict.get(param, default_dict[param]) 
-            for param in default_dict.keys()}
+    default_config = vars(default_config)
+
+    for k, v in wandb_config.items():
+        default_config[k] = v
+    return default_config
     
 def process_batch(batch, check_images_=False, split='sheaf'):
     if split == 'sheaf':
