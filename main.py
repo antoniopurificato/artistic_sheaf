@@ -9,6 +9,7 @@ import open_clip
 import yaml
 import wandb
 from pytorch_lightning.loggers import WandbLogger
+from fvcore.nn import FlopCountAnalysis
 
 from src.data import *
 from src.model_loss import *
@@ -18,7 +19,7 @@ from src.metrics import *
 def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_size:int=1,
          base_folder: str = "data",
          checkpoint_name=None, sweep_config=None,
-         dataset_name:str="SemArt"):
+         dataset_name:str="Hertziana"):
     """
     Main function modified to use SheafMultimodalGNN with train/val/test splits.
     """
@@ -27,6 +28,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     print(f"Using device: {device}")
     seed_everything(seed=seed)
     
+    print(f"Loading data and building graphs... {dataset_name}")
     # Define file paths
     train_path = os.path.join(data_folder, dataset_name, f"triplets_{dataset_name.lower()}_train.json")
     val_path = os.path.join(data_folder, dataset_name, f"triplets_{dataset_name.lower()}_val.json")
@@ -35,7 +37,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     _,_, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     
     # Training data
-    train_data_list = load_json_data(train_path)[:5000]
+    train_data_list = load_json_data(train_path)[:20000]
     train_graph_data, train_node_to_id, train_edge_labels = build_graph_from_json(train_data_list, preprocess, tokenizer,
                                                                                   base_folder=base_folder,
                                                                                   dataset_name=dataset_name)
@@ -43,13 +45,20 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     print("Loaded training data with {} nodes.".format(len(train_node_to_id.keys())))
     
     # Validation data
-    val_data_list = load_json_data(val_path)[:1000]
+    val_data_list = load_json_data(val_path)[:5000]
     val_graph_data, val_node_to_id, val_edge_labels = build_graph_from_json(val_data_list, preprocess, tokenizer,
                                                                             base_folder=base_folder,
                                                                             dataset_name=dataset_name)
     val_graph_data = val_graph_data.to(device)
     print("Loaded val data with {} nodes.".format(len(val_node_to_id.keys())))
 
+    test_path = os.path.join(data_folder, dataset_name, f"triplets_{dataset_name.lower()}_test.json")
+    test_data_list = load_json_data(test_path)
+    test_graph_data, test_node_to_id, test_edge_labels = build_graph_from_json(test_data_list, preprocess, tokenizer,
+                                                                           base_folder=base_folder,
+                                                                           dataset_name=dataset_name)
+    test_graph_data = test_graph_data.to(device)
+    print("Loaded test data with {} nodes.".format(len(test_node_to_id.keys())))
     
     if not args.sweep:
         # Initialize the model
@@ -119,24 +128,20 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
         gradient_clip_val=1.0, gradient_clip_algorithm="norm"
     )
     
-    # from torch.profiler import profile
-    # # Train the model
-    # with profile(activities=[torch.profiler.ProfilerActivity.CUDA], record_shapes=True) as prof:
+    if args.sweep:
+        batch = next(iter(train_loader))
+        flops = obtain_flops(batch, model, device)
+        print(f"FLOPs: {flops:.3e}")
+        wandb.log({"flops" : flops})
+
     trainer.fit(model, train_loader, val_loader)
     
-    test_path = os.path.join(data_folder, dataset_name, f"triplets_{dataset_name.lower()}_test.json")
-    test_data_list = load_json_data(test_path)
-    test_graph_data, test_node_to_id, test_edge_labels = build_graph_from_json(test_data_list, preprocess, tokenizer,
-                                                                           base_folder=base_folder,
-                                                                           dataset_name=dataset_name)
-    test_graph_data = test_graph_data.to(device)
-    print("Loaded test data with {} nodes.".format(len(test_node_to_id.keys())))
     test_dataset = GraphEdgeDataset(test_graph_data, device=device)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     model.eval()
     model.to(device)
     img_embs, txt_embs = predict_embeddings(test_loader, model, device=device)
-    results = compute_test_metrics(img_embs, txt_embs, test_data_list, verbose=False, img_path='/Users/ludovicaschaerf/Desktop/Sheaf_Art/SemArt/images/')
+    results = compute_test_metrics(img_embs, txt_embs, test_data_list, verbose=False, img_path=f'{dataset_name}/')
     
     if args.sweep:
         wandb.log(results)
@@ -215,7 +220,7 @@ if __name__ == "__main__":
         "--dataset",
         type=str,
         default="SemArt",
-        choices=["SemArt", "Hertziana"],
+        choices=["SemArt", "Hertziana", "Wikidataset"],
         help="Name of the dataset.",
     )
     

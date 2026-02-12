@@ -1,5 +1,6 @@
 data/SemArt
 data/Hertziana
+data/Wikidataset
 **/__pycache__/
 lightning_logs/
 figures/

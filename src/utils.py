@@ -8,6 +8,21 @@ import torch.nn.functional as F
 import numpy as np
 import argparse
 import os
+from fvcore.nn import FlopCountAnalysis
+
+def obtain_flops(batch, model, device):
+    x_img, x_text, edge_index, edge_attr = process_batch(
+    batch,
+    split="sheaf",
+    check_images_=True,
+    )
+
+    model.eval()
+
+    inputs = (x_img.to(device), x_text.to(device), edge_index.to(device), edge_attr.to(device))
+
+    flops = FlopCountAnalysis(model.to(device), inputs).total()
+    return flops
 
 def predict_embeddings(test_loader, model, verbose=False, device='cpu'):
 
@@ -141,6 +156,8 @@ class GraphEdgeDataset(torch.utils.data.Dataset):
         edge_attr = self.edge_attrs[idx]
         nodes = torch.unique(edge)
         batch_x = [self.x[int(n)] for n in nodes]
+        # if len([x for x in batch_x if isinstance(x, torch.Tensor) and x.dim() > 1]) == 0:
+        #     print(batch_x)
         batch_img = torch.stack([x for x in batch_x if isinstance(x, torch.Tensor) and x.dim() > 1], dim=0).squeeze(0).to(torch.float32).to(self.device)  # Add batch dimension
         
         if not torch.isfinite(batch_img).all():

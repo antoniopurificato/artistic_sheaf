@@ -108,7 +108,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         out_proj=False,
         test=False,
         verbose=True,
-        laplacian_heat_kernel=True,
+        _laplacian_heat_kernel=True,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -124,7 +124,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         self.weights_kl_vs_clip = weights_kl_vs_clip
         self.w_clip_vs_mask = w_clip_vs_mask
 
-        self.laplacian_heat_kernel = laplacian_heat_kernel
+        self._laplacian_heat_kernel = _laplacian_heat_kernel
         self.optimizer_cls = getattr(torch.optim, optimizer)
         
         self.init_clip(clip_grad, finetune_layers=finetune_layers)
@@ -153,23 +153,6 @@ class SheafMultimodalGNN(pl.LightningModule):
             nn.Linear(latent_dim, latent_dim),
         )    
         self.out_proj = out_proj
-    
-    # def on_train_start(self):
-    #     self._profiled = False 
-
-    # def profile(self, batch):
-
-    #     with torch.profiler.profile(
-    #         activities=[torch.profiler.ProfilerActivity.CUDA],
-    #         with_flops=True,
-    #         record_shapes=False,
-    #     ) as prof:
-    #         out = self.step(batch, 0, "train")
-
-    #     flops = sum(e.flops for e in prof.key_averages() if e.flops)
-    #     self.log("train_flops", flops)
-    #     self._profiled = True
-
     
     def init_clip(self, clip_grad, finetune_layers=5):
         self.clip_model, _, _ = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
@@ -312,8 +295,6 @@ class SheafMultimodalGNN(pl.LightningModule):
 
         x_img, x_text, edge_index, edge_attr = process_batch(batch)  
 
-        # if split == 'train' and batch_idx == 0 and not self._profiled:
-        #     self.profile(batch)
         
         # Forward pass to get all embeddings
         img_emb, txt_emb = self(x_img, x_text, edge_index, edge_attr, split=split)
@@ -330,7 +311,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         
         G, LG, edge_ids = self.build_lg_from_edge_index(edge_index)
         
-        if self.laplacian_heat_kernel:
+        if self._laplacian_heat_kernel:
             W = self.laplacian_heat_kernel(LG, tau=0.7, device=img_emb.device)
         else:
             D = self.compute_ordered_distance_matrix(LG, edge_ids)
