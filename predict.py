@@ -17,14 +17,42 @@ from src.metrics import *
 
 dataset_name = "Hertziana"
 verbose = False
-
-triplets = f'data/{dataset_name}/triplets_{dataset_name.lower()}_test.json'
-loaded_data = load_json_data(triplets)#[:50]
-print(f"Loaded {len(loaded_data)} triplets from {triplets}")
-
-device = 'cuda' if torch.cuda.is_available() else 'mps'
+device='cuda' if torch.cuda.is_available() else 'mps'
 print(f"Using device: {device}")
 seed_everything(seed=42)
+
+
+# Initialize the model
+model = SheafMultimodalGNN(
+    _laplacian_heat_kernel = True,
+    alpha = 1.2,
+    clip_grad = True,
+    edge_attr_dim = 512,
+    finetune_layers = 3,
+    latent_dim = 512,
+    lr = 0.0001,
+    optimizer = 'AdamW',
+    out_proj = False,
+    sheaf_layers = 3,
+    step_size = 1,
+    test = False,
+    w_clip_vs_mask = 0.7,
+    weights_components = 0.5,
+    weights_kl_vs_clip = 0.3,
+    device = device
+)
+# Load checkpoint
+checkpoint = torch.load("checkpoints/sheaf-gnn-epoch=07-val_loss=4.00_test.ckpt", map_location=device)
+model.load_state_dict(checkpoint['state_dict'])
+model = model.to(device)
+model.eval()
+print()
+
+
+triplets = f'data/{dataset_name}/triplets_{dataset_name.lower()}_test.json'
+loaded_data = load_json_data(triplets)
+print(f"Loaded {len(loaded_data)} triplets from {triplets}")
+
 
 # Load tokenizer and preprocessing
 tokenizer = open_clip.get_tokenizer('ViT-B-32')
@@ -49,22 +77,6 @@ links = torch.cat(links, dim=0).to(device)
 
 print(f"Total images shape: {images.shape}, Total texts shape: {texts.shape}, Total links shape: {links.shape}")
 
-# Initialize the model
-model = SheafMultimodalGNN(
-    latent_dim=512,
-    edge_attr_dim=512,
-    num_layers=3,
-    step_size=1.0,
-    lr=1e-4,
-    device='cuda' if torch.cuda.is_available() else 'mps'
-)
-    
-# Load checkpoint
-checkpoint = torch.load("checkpoints/sheaf-gnn-epoch=05-val_loss=5.59_hertz_kl_lapl.ckpt", map_location=device)
-model.load_state_dict(checkpoint['state_dict'])
-model = model.to(device)
-model.eval()
-print()
 
 clip_images = []
 clip_texts = []

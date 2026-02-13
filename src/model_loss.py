@@ -97,7 +97,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         sheaf_layers: int = 3,
         step_size: float = 1.0,
         lr: float = 1e-3,
-        finetune_layers: int = 4,
+        finetune_layers: int = 3,
         alpha: float = 1.2,
         weights_components: float = 0.5,
         weights_kl_vs_clip: float = 0.3,
@@ -146,10 +146,10 @@ class SheafMultimodalGNN(pl.LightningModule):
         self.output_proj = nn.Sequential(
             nn.Linear(latent_dim, latent_dim),
             nn.LeakyReLU(),
-            nn.Linear(latent_dim, latent_dim * 2),
-            nn.LeakyReLU(),
-            nn.Linear(latent_dim * 2, latent_dim),
-            nn.LeakyReLU(),
+            # nn.Linear(latent_dim, latent_dim * 2),
+            # nn.LeakyReLU(),
+            # nn.Linear(latent_dim * 2, latent_dim),
+            # nn.LeakyReLU(),
             nn.Linear(latent_dim, latent_dim),
         )    
         self.out_proj = out_proj
@@ -233,6 +233,11 @@ class SheafMultimodalGNN(pl.LightningModule):
             if self.out_proj:
                 out_img = self.output_proj(out_img)
                 out_txt = self.output_proj(out_txt)
+        else:
+            x_img_ext = t_img[edge_index[0]]
+            x_txt_ext = t_txt[edge_index[1]]
+        
+            out_img, out_txt = x_img_ext, x_txt_ext
             
         return out_img, out_txt
     
@@ -501,4 +506,41 @@ class SheafMultimodalGNN(pl.LightningModule):
             torch.optim.Optimizer: Adam optimizer
         """
         return self.optimizer_cls(filter(lambda p: p.requires_grad, self.parameters()), lr=self.lr)
+    
+    def predict(self, x_img, x_text, edge_attr):
+        """
+        Predict image embeddings for given image paths.
+
+        Args:
+            image_paths (List[str]): List of image file paths
+        Returns:
+            Tensor: Image embeddings
+        """
+        with torch.no_grad():
+            edge_attr = self.clip_model.encode_text(edge_attr) 
+
+            t_img = self.clip_model.encode_image(x_img)  # Encode image features
+            t_text = self.clip_model.encode_text(x_text)  # Encode text features
+            
+            self.num_nodes = t_img.size(0) + t_text.size(0)
+                
+            t_img = self.input_proj_image(t_img) # at some point pass to concatenation immediately
+            t_txt = self.input_proj_text(t_text)
+            
+            h_list_img = []
+            h_list_txt = []
+            all_maps = []
+            for i, conv in enumerate(self.convs):
+                t_img, t_txt, maps = conv(t_img, t_txt, edge_attr, split='predict')
+                
+                h_list_img.append(t_img)
+                h_list_txt.append(t_txt)
+                all_maps.append(maps)
+                
+            out_img = torch.stack(h_list_img, dim=0).mean(dim=0)
+            out_txt = torch.stack(h_list_txt, dim=0).mean(dim=0)
+                
+        out_img = F.normalize(out_img, dim=1)
+        out_txt = F.normalize(out_txt, dim=1)
+        return out_img, out_txt
     
