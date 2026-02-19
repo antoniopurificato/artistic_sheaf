@@ -18,6 +18,7 @@ from typing import Dict, Tuple, Optional
 import torch
 from torch_geometric.data import Data
 
+from competitors.utils_competitors import seed_everything, save_results
 
 class ImageLabelDataset(Dataset):
     """
@@ -372,9 +373,9 @@ def main(args):
     )
 
     with open(train_json) as f:
-        train_data = json.load(f)[:100000]
+        train_data = json.load(f)#[:100000]
     with open(test_json) as f:
-        test_data = json.load(f)[:10000]
+        test_data = json.load(f)#[:10000]
 
     # -----------------------
     # Build per-task label mapping
@@ -531,14 +532,19 @@ def main(args):
         test_idx_by_task=test_idx_by_task,
     )
 
-    print("\n✅ GNNBoost Accuracy (per task):")
+    print("\nGNNBoost Accuracy (per task):")
     for task, a in sorted(acc_by_task.items(), key=lambda x: x[0]):
         print(f"  {task}: {a:.4f}")
+        
+    save_results('ekg', args.dataset, 'classification', args.seed, acc_by_task)
 
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--base_folder", default="data")
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    seed_everything(args.seed)
+    
     main(args)

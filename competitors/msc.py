@@ -11,7 +11,7 @@ from torchvision import models, transforms
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import normalize
 
-
+from competitors.utils_competitors import seed_everything, save_results
 from competitors.coli_approaches import evaluate_graph_with_colpali
 from competitors.data_competitors import load_json_data, build_graph_from_json
 from src.utils import GraphEdgeDataset
@@ -565,15 +565,15 @@ def evaluate(args):
     for k, v in metrics.items():
         print(f' - {k}: {v}')
 
-    if args.save_results:
-        results = {
-            "metrics": metrics,
-        }
-        results_path = args.results_file
-        with open(results_path, 'w') as f:
-            json.dump(results, f, indent=2)
-        print(f"\nResults saved to: {results_path}")
-
+    # if args.save_results:
+    #     results = {
+    #         "metrics": metrics,
+    #     }
+    #     results_path = args.results_file
+    #     with open(results_path, 'w') as f:
+    #         json.dump(results, f, indent=2)
+    #     print(f"\nResults saved to: {results_path}")
+    save_results('msc', args.dataset, 'retrieval', args.seed, metrics)
 
 
 def main():
@@ -597,7 +597,7 @@ def main():
         "--dataset",
         type=str,
         default="SemArt",
-        choices=["Hertziana", "SemArt"],
+        choices=["Hertziana", "SemArt", "Wikidataset"],
         help="Path to training data JSON file (required for train mode)"
     )
 
@@ -685,7 +685,15 @@ def main():
         help="Path to save evaluation results (default: eval_results.json)"
     )
     
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility (default: 42)"
+    )
+    
     args = parser.parse_args()
+    seed_everything(args.seed)
     
     if args.mode == "train":
         train(args)

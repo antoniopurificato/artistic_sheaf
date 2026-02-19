@@ -2,7 +2,7 @@ import os
 import numpy as np
 import torch
 import pytorch_lightning as pl
-from torch_geometric.data import DataLoader
+from torch_geometric.loader import DataLoader
 import argparse
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 import open_clip
@@ -10,6 +10,7 @@ import yaml
 import wandb
 from pytorch_lightning.loggers import WandbLogger
 from fvcore.nn import FlopCountAnalysis
+import torch.multiprocessing as mp
 
 from src.data import *
 from src.model_loss import *
@@ -37,19 +38,19 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     _,_, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     
     # Training data
-    train_data_list = load_json_data(train_path)#[:20000]
+    train_data_list = load_json_data(train_path)#[:10000]
     train_graph_data, train_node_to_id, train_edge_labels = build_graph_from_json(train_data_list, preprocess, tokenizer,
                                                                                   base_folder=base_folder,
                                                                                   dataset_name=dataset_name)
-    train_graph_data = train_graph_data.to(device)
+    train_graph_data = train_graph_data.to('cpu')
     print("Loaded training data with {} nodes.".format(len(train_node_to_id.keys())))
     
     # Validation data
-    val_data_list = load_json_data(val_path)[:20000]
+    val_data_list = load_json_data(val_path)#[:1000]
     val_graph_data, val_node_to_id, val_edge_labels = build_graph_from_json(val_data_list, preprocess, tokenizer,
                                                                             base_folder=base_folder,
                                                                             dataset_name=dataset_name)
-    val_graph_data = val_graph_data.to(device)
+    val_graph_data = val_graph_data.to('cpu')
     print("Loaded val data with {} nodes.".format(len(val_node_to_id.keys())))
 
     
@@ -98,11 +99,23 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     print(check_graph_properties(train_graph_data))
     
     print('Number of batches', len(train_data_list) // batch_size + 1)
-    train_dataset = GraphEdgeDataset(train_graph_data, device)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
-    val_dataset = GraphEdgeDataset(val_graph_data, device)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-       
+    train_dataset = GraphEdgeDataset(train_graph_data, 'cpu')
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=10, pin_memory=True, prefetch_factor=1, persistent_workers=True,)
+    val_dataset = GraphEdgeDataset(val_graph_data, 'cpu')
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=10, pin_memory=True, prefetch_factor=1, persistent_workers=True,)
+    
+    for (x_img, x_text, edge_index, edge_attr ) in train_loader:
+        x_img = x_img.to(device, non_blocking=True)
+        x_text = x_text.to(device, non_blocking=True)
+        edge_index = edge_index.to(device, non_blocking=True)
+        edge_attr = edge_attr.to(device, non_blocking=True)
+        
+    for (x_img, x_text, edge_index, edge_attr ) in val_loader:
+        x_img = x_img.to(device, non_blocking=True)
+        x_text = x_text.to(device, non_blocking=True)
+        edge_index = edge_index.to(device, non_blocking=True)
+        edge_attr = edge_attr.to(device, non_blocking=True)
+        
     # Configure the trainer with GPU acceleration
     trainer = pl.Trainer(
         max_epochs=epochs,
@@ -129,16 +142,25 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
 
     trainer.fit(model, train_loader, val_loader)
     
+    del train_loader, val_loader, train_graph_data, val_graph_data
+    
     test_path = os.path.join(data_folder, dataset_name, f"triplets_{dataset_name.lower()}_test.json")
     test_data_list = load_json_data(test_path)
     test_graph_data, test_node_to_id, test_edge_labels = build_graph_from_json(test_data_list, preprocess, tokenizer,
                                                                            base_folder=base_folder,
                                                                            dataset_name=dataset_name)
-    test_graph_data = test_graph_data.to(device)
+    test_graph_data = test_graph_data.to('cpu')
     print("Loaded test data with {} nodes.".format(len(test_node_to_id.keys())))
 
-    test_dataset = GraphEdgeDataset(test_graph_data, device=device)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    test_dataset = GraphEdgeDataset(test_graph_data, device='cpu')
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=10, pin_memory=True)
+    
+    for (x_img, x_text, edge_index, edge_attr ) in test_loader:
+        x_img = x_img.to(device, non_blocking=True)
+        x_text = x_text.to(device, non_blocking=True)
+        edge_index = edge_index.to(device, non_blocking=True)
+        edge_attr = edge_attr.to(device, non_blocking=True)
+    
     model.eval()
     model.to(device)
     img_embs, txt_embs = predict_embeddings(test_loader, model, device=device)
@@ -168,7 +190,8 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
 
 if __name__ == "__main__":
     
-    
+    mp.set_start_method("spawn", force=True)
+
     parser = argparse.ArgumentParser()
     
     parser.add_argument(
@@ -186,14 +209,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=512,
+        default=256,
         help="Batch size",
     )
     
     parser.add_argument(
         "--lr",
         type=float,
-        default=1e-4,
+        default=1e-5,
         help="Learning rate",
     )
     
@@ -229,7 +252,7 @@ if __name__ == "__main__":
         "--epochs",
         type=int,
         default=50,
-        help="Latent dimension.",
+        help="Number of epochs.",
     )
     
     args = parser.parse_args()

@@ -16,6 +16,30 @@ import json
 from torchvision import transforms
 from tqdm import tqdm
 
+def save_results(method_name, dataset_name, task_type, seed, task_metric):
+    # save task metrics to .json
+    os.makedirs('results', exist_ok=True)
+    with open(f'results/{method_name}_{dataset_name}_{task_type}_{seed}_metrics.json', 'w') as f:
+        json.dump(task_metric, f)
+
+
+def seed_everything(seed: int = 42) -> None:
+    """
+    Set random seeds for reproducibility across multiple libraries.
+
+    Args:
+        seed: Integer seed for random number generation
+    """
+    import random
+    import numpy
+    import torch
+
+    random.seed(seed)
+    numpy.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        
 # def recall_at_k(y_true, y_score, k):
 #     """
 #     y_true: binary array (1 = relevant, 0 = not relevant)
@@ -24,6 +48,15 @@ from tqdm import tqdm
 #     top_k_idx = np.argsort(y_score)[-k:]
 #     return y_true[top_k_idx].sum() / y_true.sum()
 import numpy as np
+
+def accuracy_score(y_true, y_pred):
+    """
+    Simple accuracy score for multi-class classification.
+
+    y_true: (N,) true class indices
+    y_pred: (N,) predicted class indices
+    """
+    return np.mean(y_true == y_pred)
 
 def recall_at_k(y_true, y_score, k=10):
     """
@@ -35,6 +68,8 @@ def recall_at_k(y_true, y_score, k=10):
     y_true = np.asarray(y_true)
     y_score = np.asarray(y_score)
 
+    print("y_true shape:", y_true.shape)
+    print("y_score shape:", y_score.shape)
     assert y_true.ndim == 2 and y_score.ndim == 2, (y_true.shape, y_score.shape)
     assert y_true.shape == y_score.shape, (y_true.shape, y_score.shape)
 
