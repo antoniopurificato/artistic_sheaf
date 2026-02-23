@@ -559,21 +559,17 @@ def evaluate(args):
 
     
     # Perform evaluation
-    sim, metrics = evaluate_graph_with_colpali(graph_data, loaded_data)
+    metrics = evaluate_graph_with_colpali(graph_data, loaded_data)
 
+    
+    recalls = {}
     print('\nEvaluation metrics:')
-    for k, v in metrics.items():
-        print(f' - {k}: {v}')
-
-    # if args.save_results:
-    #     results = {
-    #         "metrics": metrics,
-    #     }
-    #     results_path = args.results_file
-    #     with open(results_path, 'w') as f:
-    #         json.dump(results, f, indent=2)
-    #     print(f"\nResults saved to: {results_path}")
-    save_results('msc', args.dataset, 'retrieval', args.seed, metrics)
+    for key, value in metrics.items():
+        if 'recall' in key and 'mean' not in key:
+            print(f"{key}: {value}")
+            recalls[str(key)] = float(value)
+    
+    save_results('msc', args.dataset, 'retrieval', args.seed, recalls)
 
 
 def main():

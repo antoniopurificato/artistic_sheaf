@@ -28,7 +28,7 @@
     values: [1, 0.7, 0.5, 0.3, 0] # 0.7, 0.5, 0.3,
 
   w_clip_vs_mask:
-    values: [1, 0.5, 0] #0.7, 0.5, 0.3,
+    values: [1, 0, 0.5, 0.3, 0.7] #0.7, 0.5, 0.3,
 
   test:
     values: [False, True]
@@ -36,6 +36,6 @@
   out_proj: 
     values: [False, True]
 
-  laplacian_heat_kernel:
+  _laplacian_heat_kernel:
     values: [False, True]
 

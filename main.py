@@ -20,7 +20,7 @@ from src.metrics import *
 def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_size:int=1,
          base_folder: str = "data",
          checkpoint_name=None, sweep_config=None,
-         dataset_name:str="Hertziana"):
+         dataset_name:str="SemArt"):
     """
     Main function modified to use SheafMultimodalGNN with train/val/test splits.
     """
@@ -100,9 +100,9 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     
     print('Number of batches', len(train_data_list) // batch_size + 1)
     train_dataset = GraphEdgeDataset(train_graph_data, 'cpu')
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=10, pin_memory=True, prefetch_factor=1, persistent_workers=True,)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)#, prefetch_factor=1, persistent_workers=True,)
     val_dataset = GraphEdgeDataset(val_graph_data, 'cpu')
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=10, pin_memory=True, prefetch_factor=1, persistent_workers=True,)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)#, prefetch_factor=1, persistent_workers=True,)
     
     for (x_img, x_text, edge_index, edge_attr ) in train_loader:
         x_img = x_img.to(device, non_blocking=True)
@@ -119,13 +119,13 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     # Configure the trainer with GPU acceleration
     trainer = pl.Trainer(
         max_epochs=epochs,
-        accelerator=device,
+        accelerator=device.split(':')[0],
         devices=1, # Use 1 GPU if available
         callbacks=[
             EarlyStopping(monitor='val_loss', patience=5),
             ModelCheckpoint(
                 monitor='val_loss',
-                dirpath='checkpoints',
+                dirpath=f'checkpoints_{dataset_name}',
                 filename='sheaf-gnn-{epoch:02d}-{val_loss:.2f}',
                 save_top_k=3
             )
@@ -153,7 +153,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
     print("Loaded test data with {} nodes.".format(len(test_node_to_id.keys())))
 
     test_dataset = GraphEdgeDataset(test_graph_data, device='cpu')
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=10, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
     
     for (x_img, x_text, edge_index, edge_attr ) in test_loader:
         x_img = x_img.to(device, non_blocking=True)
@@ -190,7 +190,7 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
 
 if __name__ == "__main__":
     
-    mp.set_start_method("spawn", force=True)
+    # mp.set_start_method("spawn", force=True)
 
     parser = argparse.ArgumentParser()
     
@@ -258,7 +258,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
      
     if not args.sweep:
-        main('data', plot_graph=True, batch_size=args.batch_size, seed=42,
+        main('data', plot_graph=False, batch_size=args.batch_size, seed=42,
              base_folder='data', sweep_config=args,
              dataset_name=args.dataset)
     else:

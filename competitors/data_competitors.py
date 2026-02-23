@@ -5,7 +5,8 @@ import torch
 import numpy as np
 from tqdm import tqdm
 from typing import List, Dict, Tuple
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
+
 from torch_geometric.data import Data
 from torchvision import transforms
 from transformers import ColPaliForRetrieval, ColPaliProcessor, ColQwen2ForRetrieval, ColQwen2Processor
@@ -98,7 +99,7 @@ def load_model_and_processor(model_type="colpali", device='cuda'):
 # Function to get embeddings for images or text using ColPali (or ColQwen2)
 def get_colpali_embedder(itm: str, model, processor,
                          base_folder: str = 'data/wikidata_arthist/',
-                         dataset_name:str='SemArt') -> torch.Tensor:
+                         dataset_name:str='SemArt', itm_link = None) -> torch.Tensor:
     """
     Embeds either an image or text input using ColPali (HF API, 4-bit safe).
     Handles dtype and device properly for both images and text.
@@ -118,7 +119,21 @@ def get_colpali_embedder(itm: str, model, processor,
         if is_image:
             img_path = path_candidate if os.path.isfile(path_candidate) else itm
             img = Image.open(img_path).convert("RGB")
+            # make plot with title the relationship
 
+            if itm_link:
+                # Call draw Method to add 2D graphics in an image
+                I1 = ImageDraw.Draw(img)
+
+                # Custom font style and font size
+                myFont = ImageFont.truetype('FreeMono.ttf', 65)
+
+                # Add Text to an image
+                I1.text((10, 10), itm_link, font=myFont, fill =(255, 0, 0))
+
+                # # Save the edited image
+                # img.save("example.png")
+                
             inputs = processor(images=[img], return_tensors="pt")
             inputs = {k: (v.to(device).to(model_dtype) if v.dtype.is_floating_point else v.to(device))
                      for k, v in inputs.items()}
@@ -177,7 +192,7 @@ def build_graph_from_json(
                 if model_type != "msc":
                     emb = get_colpali_embedder(val, model=model, processor=processor,
                                                base_folder=base_folder,
-                                               dataset_name=dataset_name)
+                                               dataset_name=dataset_name, itm_link=item['link'])
                 else:
                     emb = get_msc_embedder(val, model, processor, vocab,
                                            base_folder,
@@ -199,7 +214,7 @@ def build_graph_from_json(
         if model_type != "msc":
             link_emb = get_colpali_embedder(link_text, model, processor,
                                             base_folder,
-                                            dataset_name=dataset_name)
+                                            dataset_name=dataset_name, itm_link=item['link'])
         else:
             link_emb = get_msc_embedder(val, model, processor, vocab,
                                         base_folder,

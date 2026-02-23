@@ -7,3 +7,4 @@ figures/
 checkpoints/
 test_images/
 wandb/
+results/
