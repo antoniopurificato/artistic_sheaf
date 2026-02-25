@@ -156,8 +156,9 @@ class GraphEdgeDataset(torch.utils.data.Dataset):
         edge_attr = self.edge_attrs[idx]
         nodes = torch.unique(edge)
         batch_x = [self.x[int(n)] for n in nodes]
-        # if len([x for x in batch_x if isinstance(x, torch.Tensor) and x.dim() > 1]) == 0:
-        #     print(batch_x)
+        
+        if len([x for x in batch_x if isinstance(x, torch.Tensor) and x.dim() > 1]) == 0:
+            print(batch_x)
         batch_img = torch.stack([x for x in batch_x if isinstance(x, torch.Tensor) and x.dim() > 1], dim=0).squeeze(0).to(torch.float32).to(self.device)  # Add batch dimension
         
         if not torch.isfinite(batch_img).all():

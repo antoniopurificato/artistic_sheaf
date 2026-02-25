@@ -174,7 +174,7 @@ def main():
 
     test_dataset = GraphEdgeDataset(test_graph_data, device=device)
 
-    num_batches = max(1, len(test_dataset) // 8000)
+    num_batches = max(1, len(test_dataset) // 3000)
     batch_size = max(1, len(test_dataset) // num_batches)
 
     print(f"Using {num_batches} batches")

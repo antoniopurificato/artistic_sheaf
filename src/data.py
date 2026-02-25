@@ -15,8 +15,6 @@ from torchvision import transforms
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-
-
 def get_clip_embedder(itm, preprocess, tokenizer, base_folder='../wikidata_arthist/',
                       dataset_name:str="SemArt"):
     

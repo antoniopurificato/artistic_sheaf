@@ -379,18 +379,29 @@ def train_model_multitask(model, dataloaders_dict, features, labels,
 
 
 def main(dataset_root, dataset_name, num_epochs, task_type, seed=42):
-    if task_type == 'classification':
-        TASKS = ["author", "school", "genre", "timeframe", "material"]          
-    else:
-        TASKS = ['content', 'context', 'description', 'form'] 
     
-    EDGE_LINKS = TASKS
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     train_entries = load_json(os.path.join(dataset_root, dataset_name, f"triplets_{dataset_name.lower()}_train.json"))#[:5000]
     val_entries   = load_json(os.path.join(dataset_root, dataset_name, f"triplets_{dataset_name.lower()}_val.json"))#[:1000]
     test_entries  = load_json(os.path.join(dataset_root, dataset_name, f"triplets_{dataset_name.lower()}_test.json"))#[:1000]
+
+    if task_type == 'classification' and dataset_name  == 'SemArt':
+        TASKS = ["author", "school", "genre", "timeframe", "material"]          
+    elif task_type == 'retrieval' and dataset_name  == 'SemArt':
+        TASKS = ['content', 'context', 'description', 'form'] 
+    elif task_type == 'classification' and dataset_name  == 'Hertziana':
+        TASKS = ["acquisition period", "artist"]
+    elif task_type == 'retrieval' and dataset_name  == 'Hertziana':
+        TASKS = list(set([k['link'] for k in train_entries if k['link'] not in ["acquisition period", "artist", "medium"]]))
+    elif task_type == 'classification' and dataset_name  == 'Wikidataset':
+        TASKS = ["artist", "date", "genre", "artwork_style"]
+    elif task_type == 'retrieval' and dataset_name  == 'Wikidataset':
+        TASKS = list(set([k['link'] for k in train_entries if (k['link'] not in ["artist", "date", "genre", "artwork_style", "type"]) and ('.' not in k['link'])]))
+    else:
+        raise ValueError(f"Unsupported dataset/task combination: {dataset_name} - {task_type}")
+    print(TASKS, 'tasks for this run')
+    EDGE_LINKS = TASKS
 
     entries_all = train_entries + val_entries + test_entries
 
@@ -454,7 +465,7 @@ def main(dataset_root, dataset_name, num_epochs, task_type, seed=42):
                        merge="concatenate", multitask=True, task_type=task_type,
                        task_names = TASKS).to(device)
 
-    model.load_state_dict(torch.load(os.path.join('checkpoints', f"sagenet_weights_{dataset_name}_{task_type}_42.pth")), strict=False)
+    # model.load_state_dict(torch.load(os.path.join('checkpoints', f"sagenet_weights_{dataset_name}_{task_type}_42.pth")), strict=False)
     
     # criteria: 5x CrossEntropy
     if task_type == 'classification':

@@ -20,7 +20,7 @@ from src.metrics import *
 def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_size:int=1,
          base_folder: str = "data",
          checkpoint_name=None, sweep_config=None,
-         dataset_name:str="SemArt"):
+         dataset_name:str="Wikidataset"):
     """
     Main function modified to use SheafMultimodalGNN with train/val/test splits.
     """

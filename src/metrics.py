@@ -14,8 +14,7 @@ def compute_test_metrics(img_emb, txt_emb, data_list, verbose=False, img_path='/
                                 [t["item2"] + t["link"] for t in data_list], 
                                 img_emb, txt_emb,
                                 img_to_idx, txt_to_idx)
-    # print(f"Similarity matrix shape: {sim_matrix.shape}")
-
+    
     # extend results with more metrics
     results.update(compute_bidirectional_metrics(torch.tensor(sim_matrix), torch.tensor(adj_matrix), k_values=[1, 5, 10], prefix="test_"))
        

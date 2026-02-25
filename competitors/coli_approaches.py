@@ -10,6 +10,8 @@ from src.metrics import *
 from competitors.data_competitors import * 
 from competitors.utils_competitors import *
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 # Function to evaluate the graph data using the model (either ColPali or ColQwen2)
 def evaluate_graph_with_colpali(graph_data, loaded_data):
     """
@@ -19,7 +21,7 @@ def evaluate_graph_with_colpali(graph_data, loaded_data):
     For each edge i: query = edge_attr[i], target = destination node from edge_index[:, i]
     Compute similarity(query, all_nodes) and obtain evaluation metrics.
     """
-    test_loader = DataLoader(graph_data, batch_size=len(graph_data), shuffle=False, num_workers=0) #, pin_memory=True)
+    test_loader = DataLoader(graph_data, batch_size=len(graph_data) // 10, shuffle=False, num_workers=0) #, pin_memory=True)
     
     for (x_img, x_text, edge_index, edge_attr ) in test_loader:
         x_img = x_img.to(device, non_blocking=True)
@@ -77,7 +79,6 @@ def parse_args():
 # Main function to run the evaluation
 def main():
     args = parse_args()
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Dynamically load the model and processor based on the selected model type (ColPali or ColQwen2)
     model, processor = load_model_and_processor(model_type=args.model_type, device=device)

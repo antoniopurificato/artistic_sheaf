@@ -67,7 +67,7 @@ def get_msc_embedder(itm, model_img, model_text, vocab, base_folder='../wikidata
                                  std=[0.229, 0.224, 0.225])
     ])
     with torch.no_grad():
-        if 'Images/' in itm:
+        if 'Images/' in itm or 'gemalde/' in itm or 'zeichnungen/' in itm or 'WIKIART_sample/' in itm:
             img = Image.open(os.path.join(base_folder, dataset_name, itm)).convert("RGB")  # force RGB
             img.verify()  # check if corrupt
             image = transform(img)
@@ -112,7 +112,7 @@ def get_colpali_embedder(itm: str, model, processor,
         path_candidate = os.path.join(base_folder, dataset_name, itm)
         is_image = (
             os.path.isfile(path_candidate)
-            or "Images/" in itm
+            or 'Images/' in itm or 'gemalde/' in itm or 'zeichnungen/' in itm or 'WIKIART_sample/' in itm
             or itm.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'))
         )
 
