@@ -13,6 +13,8 @@ from PIL import Image
 from tqdm import tqdm
 from torchvision import transforms
 
+from src.utils import *
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def get_clip_embedder(itm, preprocess, tokenizer, base_folder='../wikidata_arthist/',
@@ -28,7 +30,7 @@ def get_clip_embedder(itm, preprocess, tokenizer, base_folder='../wikidata_arthi
                 image = preprocess(img).unsqueeze(0)
             except Exception as e:
                 print(f"Error loading image {os.path.join(base_folder, dataset_name, itm)}: {e}")
-                image = torch.zeros((3, 224, 224))  # placeholder or skip
+                image = torch.zeros((3, 224, 224))  
             
             if not torch.isfinite(image).all():
                 print("⚠️ Non-finite values in image", itm)
@@ -38,21 +40,6 @@ def get_clip_embedder(itm, preprocess, tokenizer, base_folder='../wikidata_arthi
         else:
             text = tokenizer([itm])
             return text
-
-
-def load_json_data(json_path: str) -> List[Dict]:
-    """
-    Loads a JSON file and returns its contents.
-
-    Args:
-        json_path (str): Path to the JSON file.
-
-    Returns:
-        List[Dict]: Parsed JSON data.
-    """
-    with open(json_path, 'r') as f:
-        return json.load(f)
-
 
 def build_graph_from_json(
     data_list: List[Dict],
@@ -99,8 +86,6 @@ def build_graph_from_json(
                     node_id_counter += 1
                 except Exception as e:
                     print(f"[Warning] Failed to embed node '{val}': {e}")
-                    #node_features.append(np.zeros((512)))
-                    #node_id_counter += 1
 
         # Create edge
         src = node_to_id[str(item.get('item1', ''))]
@@ -202,7 +187,7 @@ def main(file_name:str, data_folder:str="data",
     tokenizer = open_clip.get_tokenizer('ViT-B-32')
     _,_, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     
-    data_list = load_json_data(json_path)[:2000] #make it batch loading
+    data_list = load_json(json_path)[:2000] #make it batch loading
     graph_data, node_to_id, raw_edge_labels = build_graph_from_json(data_list, preprocess, tokenizer, base_folder,
                                                                     dataset_name="SemArt")
 

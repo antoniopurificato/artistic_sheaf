@@ -1,9 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Utility functions and classes for ArtSAGENet training.
-
-Includes early stopping, multi-task blocks, model loading, and seed setting.
-"""
 import numpy as np
 import os
 import random
@@ -15,39 +9,7 @@ from PIL import Image
 import json
 from torchvision import transforms
 from tqdm import tqdm
-
-def save_results(method_name, dataset_name, task_type, seed, task_metric):
-    # save task metrics to .json
-    os.makedirs('results', exist_ok=True)
-    with open(f'results/{method_name}_{dataset_name}_{task_type}_{seed}_metrics.json', 'w') as f:
-        json.dump(task_metric, f)
-
-
-def seed_everything(seed: int = 42) -> None:
-    """
-    Set random seeds for reproducibility across multiple libraries.
-
-    Args:
-        seed: Integer seed for random number generation
-    """
-    import random
-    import numpy
-    import torch
-
-    random.seed(seed)
-    numpy.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        
-# def recall_at_k(y_true, y_score, k):
-#     """
-#     y_true: binary array (1 = relevant, 0 = not relevant)
-#     y_score: predicted scores or probabilities
-#     """
-#     top_k_idx = np.argsort(y_score)[-k:]
-#     return y_true[top_k_idx].sum() / y_true.sum()
-import numpy as np
+from fvcore.nn import FlopCountAnalysis
 
 def accuracy_score(y_true, y_pred):
     """
@@ -68,8 +30,6 @@ def recall_at_k(y_true, y_score, k=10):
     y_true = np.asarray(y_true)
     y_score = np.asarray(y_score)
 
-    print("y_true shape:", y_true.shape)
-    print("y_score shape:", y_score.shape)
     assert y_true.ndim == 2 and y_score.ndim == 2, (y_true.shape, y_score.shape)
     assert y_true.shape == y_score.shape, (y_true.shape, y_score.shape)
 
@@ -364,10 +324,6 @@ class NeighborSamplerImages(torch.utils.data.DataLoader):
     def __repr__(self):
         return f'{self.__class__.__name__}(sizes={self.sizes})'
 
-def load_json(path):
-    with open(path, "r") as f:
-        return json.load(f)
-
 def build_nodes(entries_all):
     artworks = sorted({e["item1"] for e in entries_all})
     art2id = {p:i for i,p in enumerate(artworks)}
@@ -584,28 +540,6 @@ class Multitask_Block(nn.Module):
         
         return task1, task2, task3
 
-
-def set_seed(seed=42):
-    """
-    Set random seed for reproducibility across all libraries.
-    
-    Args:
-        seed (int): Random seed value
-    """
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    np.random.seed(seed)
-    random.seed(seed)
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    
-    if hasattr(torch, 'use_deterministic_algorithms'):
-        torch.use_deterministic_algorithms(True, warn_only=True)
-    
-    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
-
-
 def load_model(model, optimizer, exp_lr_scheduler, load_path='model.tar'):
     """
     Load a saved model checkpoint.
@@ -632,3 +566,208 @@ def load_model(model, optimizer, exp_lr_scheduler, load_path='model.tar'):
     val_score = checkpoint['current_score']
    
     return model, optimizer, exp_lr_scheduler, epoch, val_score
+
+
+from calflops import calculate_flops
+
+def obtain_flops_colpali(model, processor, device, model_type='colpali'):
+    model.eval()
+
+    # ---- Disabilita cache nel config (NON nei kwargs) ----
+    original_use_cache = getattr(model.config, 'use_cache', True)
+    model.config.use_cache = False
+    if hasattr(model, 'model') and hasattr(model.model, 'config'):
+        model.model.config.use_cache = False
+
+    dummy_image = Image.new('RGB', (448, 448), color='white')
+    dummy_query = "What is shown in this document?"
+
+    processed_images = processor.process_images([dummy_image]).to(device)
+    processed_queries = processor.process_queries([dummy_query]).to(device)
+
+    # ---- Filtra: passa SOLO tensori nei kwargs ----
+    img_kwargs = {k: v for k, v in processed_images.items() if isinstance(v, torch.Tensor)}
+    txt_kwargs = {k: v for k, v in processed_queries.items() if isinstance(v, torch.Tensor)}
+
+    # Image FLOPs
+    flops_img, _, _ = calculate_flops(
+        model=model,
+        kwargs=img_kwargs,
+        print_results=False,
+    )
+
+    # Text FLOPs
+    flops_txt, _, _ = calculate_flops(
+        model=model,
+        kwargs=txt_kwargs,
+        print_results=False,
+    )
+
+    # ---- Ripristina config originale ----
+    model.config.use_cache = original_use_cache
+
+    return flops_img + flops_txt
+
+def obtain_flops_sagenet(batch, model, device, features=None):
+    """
+    Compute FLOPs for ArtSAGENet using torch.profiler.
+    
+    Args:
+        batch: (batch_size, n_id, imgs, adjs) from NeighborSamplerImages
+        model: ArtSAGENet model
+        device: torch device
+        features: precomputed node features tensor [N, 512]
+    """
+    model.eval()
+
+    batch_size, n_id, imgs, adjs = batch
+    adjs = [adj.to(device) for adj in adjs]
+    images = torch.stack(imgs).to(device)
+    node_features = features[n_id].to(device)
+
+    activities = [torch.profiler.ProfilerActivity.CPU]
+    if torch.cuda.is_available():
+        activities.append(torch.profiler.ProfilerActivity.CUDA)
+
+    with torch.no_grad():
+        # Warmup (evita overhead primo run)
+        _ = model(images, node_features, adjs)
+
+        with torch.profiler.profile(
+            activities=activities,
+            with_flops=True,
+            record_shapes=True,
+        ) as prof:
+            _ = model(images, node_features, adjs)
+
+    total_flops = sum(
+        evt.flops for evt in prof.key_averages()
+        if evt.flops is not None and evt.flops > 0
+    )
+    return total_flops
+
+def obtain_flops_ekg(encoder, gnn, data, sample_image, device):
+    """
+    Compute FLOPs for the full EKG pipeline:
+      1. ImageEncoder (ResNet50 + projection)
+      2. GNNBoost (GAT layers)
+
+    Args:
+        encoder: ImageEncoder model
+        gnn: GNNBoost model
+        data: PyG Data object (already built)
+        sample_image: single image tensor [1, 3, 224, 224]
+        device: torch device
+    """
+    encoder.eval()
+    gnn.eval()
+
+    sample_image = sample_image.to(device)
+
+    activities = [torch.profiler.ProfilerActivity.CPU]
+    if torch.cuda.is_available():
+        activities.append(torch.profiler.ProfilerActivity.CUDA)
+
+    with torch.no_grad():
+        # ---- Warmup ----
+        _ = encoder(sample_image)
+        _ = gnn(data)
+
+        # ---- Profile encoder ----
+        with torch.profiler.profile(
+            activities=activities,
+            with_flops=True,
+            record_shapes=True,
+        ) as prof_enc:
+            _ = encoder(sample_image)
+
+        flops_encoder = sum(
+            evt.flops for evt in prof_enc.key_averages()
+            if evt.flops is not None and evt.flops > 0
+        )
+
+        # ---- Profile GNN ----
+        with torch.profiler.profile(
+            activities=activities,
+            with_flops=True,
+            record_shapes=True,
+        ) as prof_gnn:
+            _ = gnn(data)
+
+        flops_gnn = sum(
+            evt.flops for evt in prof_gnn.key_averages()
+            if evt.flops is not None and evt.flops > 0
+        )
+
+    return flops_encoder + flops_gnn
+
+
+def obtain_flops_msc(loader, model_img, model_txt, vocab, args, device):
+    """
+    Compute FLOPs for MSC pipeline:
+      1. ImageEncoder (ResNet50 + projection)
+      2. TextEncoder (GRU + projection)
+
+    Args:
+        loader: DataLoader for MSC dataset
+        model_img: ImageEncoder model
+        model_txt: TextEncoder model
+        vocab: SimpleVocab instance
+        args: argparse namespace (needs args.M)
+        device: torch device
+    """
+    model_img.eval()
+    model_txt.eval()
+
+    # ---- Prepara un batch reale ----
+    images, caps, idxs = next(iter(loader))
+    images = images.to(device)
+    B = images.size(0)
+
+    # Prepara input testo (stessa logica del training loop)
+    flat = [t for g in caps for t in g]
+    enc = [vocab.encode(s) for s in flat]
+    L = [len(x) for x in enc]
+    maxL = max(L)
+
+    ids = torch.zeros((len(enc), maxL), dtype=torch.long, device=device)
+    for i, e in enumerate(enc):
+        ids[i, :len(e)] = torch.tensor(e, device=device)
+
+    # ---- Profiling ----
+    activities = [torch.profiler.ProfilerActivity.CPU]
+    if torch.cuda.is_available():
+        activities.append(torch.profiler.ProfilerActivity.CUDA)
+
+    with torch.no_grad():
+        # Warmup
+        _ = model_img(images)
+        _ = model_txt(ids, L)
+
+        # Profile ImageEncoder
+        with torch.profiler.profile(
+            activities=activities,
+            with_flops=True,
+            record_shapes=True,
+        ) as prof_img:
+            _ = model_img(images)
+
+        flops_img = sum(
+            evt.flops for evt in prof_img.key_averages()
+            if evt.flops is not None and evt.flops > 0
+        )
+
+        # Profile TextEncoder
+        with torch.profiler.profile(
+            activities=activities,
+            with_flops=True,
+            record_shapes=True,
+        ) as prof_txt:
+            _ = model_txt(ids, L)
+
+        flops_txt = sum(
+            evt.flops for evt in prof_txt.key_averages()
+            if evt.flops is not None and evt.flops > 0
+        )
+
+    return flops_img + flops_txt

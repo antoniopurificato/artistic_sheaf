@@ -4,18 +4,16 @@ import torch.nn.functional as F
 import open_clip
 import numpy as np 
 
-def compute_test_metrics(img_emb, txt_emb, data_list, verbose=False, img_path='/Users/ludovicaschaerf/Desktop/Sheaf_Art/SemArt/images/'):
+def compute_test_metrics(img_emb, txt_emb, data_list, verbose=False, img_path=None):
     
     results = {}
     
     adj_matrix, img_to_idx, txt_to_idx = make_adj_matrix(data_list) 
-    # print(f"Adjacency matrix shape: {adj_matrix.shape}")
     sim_matrix = get_sim_matrix([t["item1"] + t["link"] for t in data_list], 
                                 [t["item2"] + t["link"] for t in data_list], 
                                 img_emb, txt_emb,
                                 img_to_idx, txt_to_idx)
     
-    # extend results with more metrics
     results.update(compute_bidirectional_metrics(torch.tensor(sim_matrix), torch.tensor(adj_matrix), k_values=[1, 5, 10], prefix="test_"))
        
     if verbose:
@@ -517,26 +515,9 @@ def get_sim_matrix(image_names, text_names, image_embeddings, text_embeddings, i
     idx_to_img = {v: k for k, v in img_to_idx.items()}
     idx_to_txt = {v: k for k, v in txt_to_idx.items()}
     
-    # 4. Reorder embeddings according to adjacency order
-    #reordered_img_emb = np.zeros((len(list(img_to_idx)), 512))
-    #for img_name, i in img_to_idx.items():
-    #    reordered_img_emb[i, :] = img_to_emb[img_name]
-    #print(reordered_img_emb.shape)
-    
-    #reordered_txt_emb = np.zeros((len(list(txt_to_idx)), 512))
-    #for txt_name, i in txt_to_idx.items():
-    #    reordered_txt_emb[i, :] = txt_to_emb[txt_name]
-    #print(reordered_txt_emb.shape)
-    
     reordered_img_emb = np.array([img_to_emb[idx_to_img[i]] for i in range(len(img_to_idx))])
     reordered_txt_emb = np.array([txt_to_emb[idx_to_txt[j]] for j in range(len(txt_to_idx))])
-    
-    # 5. Normalize and compute cosine similarity
-    #reordered_img_emb /= np.linalg.norm(reordered_img_emb, axis=1, keepdims=True)
-    #print(f"Reordered image embeddings shape: {reordered_img_emb.shape}")
-    #reordered_txt_emb /= np.linalg.norm(reordered_txt_emb, axis=1, keepdims=True)
-    
-    #print(f"Reordered text embeddings shape: {reordered_txt_emb.shape}")
+
     sim_matrix = reordered_img_emb @ reordered_txt_emb.T
     if out_emb:
         return sim_matrix, reordered_img_emb, reordered_txt_emb

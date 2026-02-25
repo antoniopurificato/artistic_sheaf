@@ -1,170 +1,186 @@
-import argparse
-import glob
 import os
-import re
+import json
+import argparse
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 import open_clip
+import numpy as np
 
-from torch_geometric.data import DataLoader
-
-from src.metrics import *
+from tqdm import tqdm
+from PIL import Image
 from src.model_loss import SheafMultimodalGNN
 from src.utils import *
 from src.data import *
-from competitors.utils_competitors import *
-
-def pick_device():
-    if torch.cuda.is_available():
-        return "cuda"
-    # keep your original choice
-    return "mps"
+from torch_geometric.data import DataLoader
+from src.metrics import *
 
 
-def extract_epoch_loss_tag(ckpt_path: str):
-    base = os.path.basename(ckpt_path)
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", type=str, required=True, choices=["Hertziana", "Wikidataset"])
+    parser.add_argument("--mode", type=str, required=True, choices=["predict", "graph"])
+    parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument("--batch_size", type=int, default=5000)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--compute_metrics", action="store_true")
+    parser.add_argument("--normalize", action="store_true")
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--latent_dim", type=int, default=512)
+    parser.add_argument("--edge_attr_dim", type=int, default=512)
+    parser.add_argument("--sheaf_layers", type=int, default=3)
+    parser.add_argument("--finetune_layers", type=int, default=3)
+    parser.add_argument("--lr", type=float, default=0.0001)
+    parser.add_argument("--alpha", type=float, default=1.2)
+    parser.add_argument("--step_size", type=int, default=1)
+    parser.add_argument("--optimizer", type=str, default="AdamW")
+    parser.add_argument("--w_clip_vs_mask", type=float, default=0.7)
+    parser.add_argument("--weights_components", type=float, default=0.5)
+    parser.add_argument("--weights_kl_vs_clip", type=float, default=0.3)
+    parser.add_argument("--laplacian_heat_kernel", action="store_true")
+    parser.add_argument("--clip_grad", action="store_true")
+    parser.add_argument("--out_proj", action="store_true")
+    parser.add_argument("--full_hyperparams", action="store_true")
+    return parser.parse_args()
 
-    m = re.search(r"epoch=(\d+).*val_loss=([0-9]+(?:\.[0-9]+)?)", base)
-    if not m:
-        return "unknown"
 
-    epoch = m.group(1)
-    loss = m.group(2).replace(".", "")
-
-    # example output: epoch03_loss325
-    return f"epoch{epoch}_loss{loss}"
-
-
-
-@torch.no_grad()
-def compute_embeddings_for_checkpoint(model, test_loader, device):
-    clip_images, clip_texts = [], []
-
-    for batch in test_loader:
-        x_img, x_text, edge_index, edge_attr = process_batch(
-            batch, split="sheaf", check_images_=False
+def build_model(args, device):
+    if args.full_hyperparams:
+        model = SheafMultimodalGNN(
+            _laplacian_heat_kernel=args.laplacian_heat_kernel,
+            alpha=args.alpha,
+            clip_grad=args.clip_grad,
+            edge_attr_dim=args.edge_attr_dim,
+            finetune_layers=args.finetune_layers,
+            latent_dim=args.latent_dim,
+            lr=args.lr,
+            optimizer=args.optimizer,
+            out_proj=args.out_proj,
+            sheaf_layers=args.sheaf_layers,
+            step_size=args.step_size,
+            test=False,
+            w_clip_vs_mask=args.w_clip_vs_mask,
+            weights_components=args.weights_components,
+            weights_kl_vs_clip=args.weights_kl_vs_clip,
+            device=device,
         )
-        x_img = x_img.to(device)
-        x_text = x_text.to(device)
-        edge_index = edge_index.to(device)
-        edge_attr = edge_attr.to(device)
+    else:
+        model = SheafMultimodalGNN(
+            latent_dim=args.latent_dim,
+            edge_attr_dim=args.edge_attr_dim,
+            device=device,
+        )
+    checkpoint = torch.load(args.checkpoint, map_location=device)
+    model.load_state_dict(checkpoint["state_dict"])
+    model = model.to(device)
+    model.eval()
+    return model
 
-        x_img, x_text = model(x_img, x_text, edge_index, edge_attr)
 
-        clip_images.append(F.normalize(x_img, dim=1))
-        clip_texts.append(F.normalize(x_text, dim=1))
+def run_predict_mode(model, loaded_data, preprocess, tokenizer, args, device):
+    images, texts, links = [], [], []
+    for data_point in tqdm(loaded_data, desc="Preprocessing"):
+        image_path = os.path.join("data", args.dataset, data_point["item1"])
+        image = preprocess(Image.open(image_path).convert("RGB")).unsqueeze(0).to(device)
+        text = tokenizer([data_point["item2"]]).to(device)
+        link = tokenizer([data_point["link"]]).to(device)
+        images.append(image)
+        texts.append(text)
+        links.append(link)
 
-    clip_images = torch.cat(clip_images, dim=0).cpu().numpy()
-    clip_texts = torch.cat(clip_texts, dim=0).cpu().numpy()
+    images = torch.cat(images, dim=0).to(device)
+    texts = torch.cat(texts, dim=0).to(device)
+    links = torch.cat(links, dim=0).to(device)
+
+    clip_images, clip_texts = [], []
+    for batch_start in range(0, len(images), args.batch_size):
+        batch_end = min(batch_start + args.batch_size, len(images))
+        with torch.no_grad():
+            img_emb, txt_emb = model.predict(
+                images[batch_start:batch_end],
+                texts[batch_start:batch_end],
+                links[batch_start:batch_end],
+            )
+        if args.normalize:
+            img_emb = F.normalize(img_emb, dim=1)
+            txt_emb = F.normalize(txt_emb, dim=1)
+        clip_images.append(img_emb.cpu().detach().numpy())
+        clip_texts.append(txt_emb.cpu().detach().numpy())
+
+    clip_images = np.concatenate(clip_images, axis=0)
+    clip_texts = np.concatenate(clip_texts, axis=0)
     return clip_images, clip_texts
 
 
-def main(dataset_name: str, ckpt_root: str = "checkpoints"):
-    verbose = False
-    seed_everything(seed=42)
-
-    device = pick_device()
-    print(f"Using device: {device}")
-
-    # triplets json
-    triplets = f"data/{dataset_name}/triplets_{dataset_name.lower()}_test.json"
-    loaded_data = load_json_data(triplets)
-    print(f"Loaded {len(loaded_data)} triplets from {triplets}")
-
-    # tokenizer / preprocess
-    tokenizer = open_clip.get_tokenizer("ViT-B-32")
-    _, _, preprocess = open_clip.create_model_and_transforms(
-        "ViT-B-32", pretrained="laion2b_s34b_b79k"
-    )
-
-    # build test graph once (shared across all checkpoints)
-    test_graph_data, test_node_to_id, test_edge_labels = build_graph_from_json(
-        loaded_data,
-        preprocess,
-        tokenizer,
-        base_folder="data",
-        split="test",
-        dataset_name=dataset_name,
+def run_graph_mode(model, loaded_data, preprocess, tokenizer, args, device):
+    test_graph_data, test_node_to_id, _ = build_graph_from_json(
+        loaded_data, preprocess, tokenizer,
+        base_folder="data", split="test", dataset_name=args.dataset,
     )
     test_graph_data = test_graph_data.to(device)
-    print(f"Loaded test data with {len(test_node_to_id.keys())} nodes.")
+    print(f"Loaded test graph with {len(test_node_to_id.keys())} nodes.")
 
     test_dataset = GraphEdgeDataset(test_graph_data, device=device)
-    num_batches = max(1, len(test_dataset) // 5000)
+    num_batches = max(1, len(test_dataset) // args.batch_size)
     print(f"Using {num_batches} batches for testing.")
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=max(1, len(test_dataset) // num_batches),
-        shuffle=False,
-    )
+    test_loader = DataLoader(test_dataset, batch_size=len(test_dataset) // num_batches, shuffle=False)
 
-    # find checkpoints
-    ckpt_dir = f'{ckpt_root}_{dataset_name}'
-    ckpt_paths = sorted(glob.glob(os.path.join(ckpt_dir, "*.ckpt")))
-    if not ckpt_paths:
-        raise FileNotFoundError(f"No .ckpt files found in: {ckpt_dir}")
+    clip_images, clip_texts = [], []
+    for batch in tqdm(test_loader, desc="Inference"):
+        with torch.no_grad():
+            x_img, x_text, edge_index, edge_attr = process_batch(batch, split="sheaf", check_images_=False)
+            x_img = x_img.to(device)
+            x_text = x_text.to(device)
+            edge_index = edge_index.to(device)
+            edge_attr = edge_attr.to(device)
+            x_img, x_text = model(x_img, x_text, edge_index, edge_attr)
+            if args.normalize:
+                x_img = F.normalize(x_img, dim=1)
+                x_text = F.normalize(x_text, dim=1)
+            clip_images.append(x_img.cpu().detach().numpy())
+            clip_texts.append(x_text.cpu().detach().numpy())
 
-    print(f"Found {len(ckpt_paths)} checkpoints in {ckpt_dir}")
+    clip_images = np.concatenate(clip_images, axis=0)
+    clip_texts = np.concatenate(clip_texts, axis=0)
+    return clip_images, clip_texts
 
-    # init model once; load weights per checkpoint
-    model = SheafMultimodalGNN(
-        latent_dim=512,
-        edge_attr_dim=512,
-        device=device,
-    ).to(device)
-    model.eval()
 
-    for ckpt_path in ckpt_paths:
-        loss_tag = extract_epoch_loss_tag(ckpt_path)
-        print(f"\n=== Evaluating: {os.path.basename(ckpt_path)} (loss tag: {loss_tag}) ===")
+def main():
+    args = parse_args()
+    device = "cuda" if torch.cuda.is_available() else "mps"
+    print(f"Using device: {device}")
+    seed_everything(seed=args.seed)
 
-        checkpoint = torch.load(ckpt_path, map_location=device)
-        model.load_state_dict(checkpoint["state_dict"], strict=True)
-        model.eval()
+    tokenizer = open_clip.get_tokenizer("ViT-B-32")
+    _, _, preprocess = open_clip.create_model_and_transforms("ViT-B-32", pretrained="laion2b_s34b_b79k")
 
-        # embeddings for this checkpoint
-        clip_images, clip_texts = compute_embeddings_for_checkpoint(model, test_loader, device)
+    triplets = f"data/{args.dataset}/triplets_{args.dataset.lower()}_test.json"
+    loaded_data = load_json(triplets)
+    print(f"Loaded {len(loaded_data)} triplets from {triplets}")
 
-        print(f"Extracted {len(clip_texts)} text embeddings of shape {clip_texts[0].shape}")
-        print(f"Extracted {len(clip_images)} image embeddings of shape {clip_images[0].shape}")
+    model = build_model(args, device)
 
-        # (optional) save embeddings per checkpoint
-        np.save(
-            f"data/{dataset_name}/clip_images_{dataset_name.lower()}_test_loss{loss_tag}.npy",
-            clip_images,
-        )
-        np.save(
-            f"data/{dataset_name}/clip_texts_{dataset_name.lower()}_test_loss{loss_tag}.npy",
-            clip_texts,
-        )
+    if args.mode == "predict":
+        clip_images, clip_texts = run_predict_mode(model, loaded_data, preprocess, tokenizer, args, device)
+    else:
+        clip_images, clip_texts = run_graph_mode(model, loaded_data, preprocess, tokenizer, args, device)
 
-        # metrics + save_results using loss_tag instead of 42
-        results = compute_test_metrics(
-            clip_images, clip_texts, loaded_data, verbose=verbose, img_path=""
-        )
+    print(f"Extracted {len(clip_images)} image embeddings of shape {clip_images[0].shape}")
+    print(f"Extracted {len(clip_texts)} text embeddings of shape {clip_texts[0].shape}")
 
-        recalls = {}
-        print('\nEvaluation metrics:')
-        for key, value in results.items():
-            if 'recall' in key and 'mean' not in key:
-                print(f"{key}: {value}")
-                recalls[str(key)] = float(value)
-        
-        # Use the loss tag (e.g. "325") instead of 42
-        # If save_results expects an int, swap to: int(loss_tag) when loss_tag != "unknown"
-        save_results("sheafclip", dataset_name, "retrieval", loss_tag, recalls)
+    np.save(f"data/{args.dataset}/clip_images_{args.dataset.lower()}_test.npy", clip_images)
+    np.save(f"data/{args.dataset}/clip_texts_{args.dataset.lower()}_test.npy", clip_texts)
+    print("Embeddings saved.")
+
+    if args.compute_metrics:
+        results = compute_test_metrics(clip_images, clip_texts, loaded_data, verbose=args.verbose, img_path="")
+        recalls = [k for k in results.keys() if "recall" in k and "mean" not in k]
+        print("General metrics:")
+        for rec in recalls:
+            print(rec, results[rec])
+        save_results("sheafclip", args.dataset, "retrieval", args.seed, recalls)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, required=True, help="Dataset name, e.g. Wikidataset")
-    parser.add_argument(
-        "--ckpt_root",
-        type=str,
-        default="checkpoints",
-        help="Root folder containing checkpoints_<dataset_name>/*.ckpt",
-    )
-    args = parser.parse_args()
-    main(args.dataset, args.ckpt_root)
+    data_download()
+    main()

@@ -1,3 +1,5 @@
+
+
 import torch
 import copy
 from tqdm import tqdm
@@ -6,8 +8,10 @@ import argparse
 from torchvision import transforms, models
 import torch.nn.functional as F
 from torch_geometric.nn import SAGEConv
-from competitors.utils_competitors import *
 import json
+
+from competitors.utils_competitors import *
+from src.utils import *
 
 IGNORE_INDEX = -100
 
@@ -60,7 +64,7 @@ class ArtSAGENet(nn.Module):
 
         
         # CNN backbone: ResNet-152
-        self.cnn = models.resnet34(pretrained=fine_tune) # TODO change to 152
+        self.cnn = models.resnet34(pretrained=fine_tune)
         self.features = nn.Sequential(
             self.cnn.conv1,
             self.cnn.bn1,
@@ -111,8 +115,7 @@ class ArtSAGENet(nn.Module):
         
         # Propagate through GraphSAGE layers
         for i, (edge_index, _, size) in enumerate(adjs):
-            target_nodes = node_features[:size[1]]  # Target nodes are always placed first
-            #print(f"Adjacency {i}: edge_index shape {edge_index.shape}, size {size}, target_nodes shape {target_nodes.shape}, node_features shape {node_features.shape}")
+            target_nodes = node_features[:size[1]]  
             node_features = self.gnn[i]((node_features, target_nodes), edge_index)
             if i != self.num_layers - 1:
                 node_features = F.relu(node_features)
@@ -147,10 +150,6 @@ class ArtSAGENet(nn.Module):
 
                 else:
                     task_outputs[k] = head(merged)
-
-            # task_outputs = {}
-            # for k in self.tasks.keys():
-            #     task_outputs[k] = self.tasks[k].to(merged.device)(merged)
             
             return task_outputs
         else:
@@ -208,8 +207,6 @@ def train_model_multitask(model, dataloaders_dict, features, labels,
         print('-' * 60)
 
         for phase in ['train', 'val', 'test']:
-            # if phase != 'test':
-            #     continue
             
             if phase == 'test':
                 model.update_merge_strategy('test')
@@ -230,7 +227,6 @@ def train_model_multitask(model, dataloaders_dict, features, labels,
                 outputs = {}
                 targets = {}
                 accuracies = {}
-                # tasks_corrects = {}
             
 
             for value in task_names:
@@ -241,7 +237,6 @@ def train_model_multitask(model, dataloaders_dict, features, labels,
                     targets[value] = []
                     recalls[value] = {'1': 0, '5': 0, '10': 0}
                 else:
-                    # tasks_corrects[value] = 0
                     outputs[value] = []
                     targets[value] = []
                     accuracies[value] = 0
@@ -251,14 +246,11 @@ def train_model_multitask(model, dataloaders_dict, features, labels,
             for batch_size, n_id, imgs, adjs in tqdm(dataloaders_dict[phase]):
                 adjs = [adj.to(device) for adj in adjs]
                 optimizer.zero_grad()
-                #print(batch_size, len(adjs), len(n_id), 'n_id length', torch.stack(imgs).shape, 'imgs shape', adjs[0].edge_index.shape, 'adj edge_index shape')
-                # Forward pass
                 with torch.set_grad_enabled(phase == 'train'):
                     out = model(torch.stack(imgs).to(device),
                                 features[n_id], adjs)
                     
                     for i, value in enumerate(task_names):
-                        #print(out[value].flatten().shape, 'out value', out[value].shape, labels[i][n_id[:batch_size]].float().shape)
                         
                         if task_type == 'classification':
                             losses[value] = criterion[i](out[value], labels[i][n_id[:batch_size]])
@@ -284,25 +276,20 @@ def train_model_multitask(model, dataloaders_dict, features, labels,
 
                 for i, value in enumerate(task_names):
                     if task_type == 'classification':
-                        # tasks_corrects[value] += torch.sum(torch.max(out[value], 1)[1] 
-                        #                                 == labels[i][n_id[:batch_size]])
-                        tgt = labels[i][n_id[:batch_size]].detach().cpu()          # (B, C) multi-hot/one-hot
-                        outb = out[value].detach().cpu()                # (B, C)
+                        tgt = labels[i][n_id[:batch_size]].detach().cpu()          
+                        outb = out[value].detach().cpu()
                         valid = (tgt > 0) 
                         tgt = tgt[valid]
                         outb = outb[valid]
-                        # print(tgt.shape, 'tgt shape', outb.shape, 'outb shape') # check if IGNORE_INDEX is present
-                        # append per-sample to keep stacking consistent
                         targets[value].extend(list(tgt))
                         outputs[value].extend(list(outb))
 
                     else:
-                        tgt = labels[i][n_id[:batch_size]].detach().cpu()          # (B, C) multi-hot/one-hot
-                        outb = out[value].sigmoid().detach().cpu()                # (B, C)
-                        valid = (tgt.sum(dim=1) > 0)                              # (B,) ignore rows
+                        tgt = labels[i][n_id[:batch_size]].detach().cpu()          
+                        outb = out[value].sigmoid().detach().cpu()                
+                        valid = (tgt.sum(dim=1) > 0)                              
                         tgt = tgt[valid]
                         outb = outb[valid]
-                        # append per-sample to keep stacking consistent
                         targets[value].extend(list(tgt))
                         outputs[value].extend(list(outb))
 
@@ -380,12 +367,10 @@ def train_model_multitask(model, dataloaders_dict, features, labels,
 
 def main(dataset_root, dataset_name, num_epochs, task_type, seed=42):
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    train_entries = load_json(os.path.join(dataset_root, dataset_name, f"triplets_{dataset_name.lower()}_train.json"))#[:5000]
-    val_entries   = load_json(os.path.join(dataset_root, dataset_name, f"triplets_{dataset_name.lower()}_val.json"))#[:1000]
-    test_entries  = load_json(os.path.join(dataset_root, dataset_name, f"triplets_{dataset_name.lower()}_test.json"))#[:1000]
-
+    train_entries = load_json(os.path.join(dataset_root, dataset_name, f"triplets_{dataset_name.lower()}_train.json"))
+    val_entries   = load_json(os.path.join(dataset_root, dataset_name, f"triplets_{dataset_name.lower()}_val.json"))
+    test_entries  = load_json(os.path.join(dataset_root, dataset_name, f"triplets_{dataset_name.lower()}_test.json"))
+    
     if task_type == 'classification' and dataset_name  == 'SemArt':
         TASKS = ["author", "school", "genre", "timeframe", "material"]          
     elif task_type == 'retrieval' and dataset_name  == 'SemArt':
@@ -402,21 +387,19 @@ def main(dataset_root, dataset_name, num_epochs, task_type, seed=42):
         raise ValueError(f"Unsupported dataset/task combination: {dataset_name} - {task_type}")
     print(TASKS, 'tasks for this run')
     EDGE_LINKS = TASKS
+    
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     entries_all = train_entries + val_entries + test_entries
 
     print(f"Total entries: {len(entries_all)}")
     artworks, art2id = build_nodes(entries_all)
 
-    # absolute image paths list_ used by NeighborSamplerImages
     list_paths = [os.path.join(dataset_root, dataset_name, p) for p in artworks]
 
     labels_list, out_channels, label2idx = build_labels(entries_all, art2id, TASKS, IGNORE_INDEX)
-    #print([len(l.unique()) for l in labels_list], 'labels list lengths')
-    print(out_channels, 'out channels per task')
     edge_index = build_edge_index(entries_all, art2id, EDGE_LINKS)
 
-    # node_idx splits (node ids belonging to each split)
     def split_node_idx(split_entries):
         s = sorted({art2id[e["item1"]] for e in split_entries})
         return torch.tensor(s, dtype=torch.long)
@@ -427,9 +410,9 @@ def main(dataset_root, dataset_name, num_epochs, task_type, seed=42):
 
     print(f"Number of nodes: {len(artworks)}")
     print(f"Number of edges: {edge_index.size(1)}")
-    print('Precomputing node features from ResNet34...')
+    print('Precomputing node features from ResNet...')
     
-    # precompute node features (512-d) from frozen ResNet34
+    # precompute node features (512-d) from frozen ResNet
     if not os.path.exists(os.path.join(dataset_root, dataset_name, f"resnet34_features_{task_type}.pt")):
         features = precompute_resnet34_features(list_paths, device=device)  # [N,512]
         torch.save(features, os.path.join(dataset_root, dataset_name, f"resnet34_features_{task_type}.pt"))
@@ -448,7 +431,7 @@ def main(dataset_root, dataset_name, num_epochs, task_type, seed=42):
     ])
 
     dataset_sizes = {"train": len(train_idx), "val": len(val_idx), "test": len(test_idx)}
-    sizes = [50, 50]  # neighbor sampling (tune)
+    sizes = [50, 50] 
     train_loader = NeighborSamplerImages(list_paths, img_transform, edge_index, sizes,
                                          node_idx=train_idx, batch_size=256, shuffle=True, num_workers=4, num_nodes = len(list_paths))
     val_loader   = NeighborSamplerImages(list_paths, img_transform, edge_index, sizes,
@@ -458,16 +441,16 @@ def main(dataset_root, dataset_name, num_epochs, task_type, seed=42):
     dataloaders = {"train": train_loader, "val": val_loader, "test": test_loader}
     print(f"Dataset sizes: {dataset_sizes}, next iter size train: {next(iter(train_loader))[1].shape}")
     
-
-    # model: in_channels=512, hidden_channels=512, out_channels list of 5
+    
     model = ArtSAGENet(in_channels=512, hidden_channels=512, out_channels=out_channels,
                        dropout=0.5, fine_tune=False,
                        merge="concatenate", multitask=True, task_type=task_type,
                        task_names = TASKS).to(device)
-
-    # model.load_state_dict(torch.load(os.path.join('checkpoints', f"sagenet_weights_{dataset_name}_{task_type}_42.pth")), strict=False)
     
-    # criteria: 5x CrossEntropy
+    
+    batch = next(iter(train_loader))
+    flops = obtain_flops_sagenet(batch, model, device, features=features)
+    
     if task_type == 'classification':
         crit = [nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX) for _ in range(len(TASKS))]
     else:
@@ -494,8 +477,6 @@ def main(dataset_root, dataset_name, num_epochs, task_type, seed=42):
         
     features = features.to(device)
     
-    print(labels_list[0].shape, 'labels shape example', labels_list[0][:10])
-    print(features.shape, 'features shape')
     print("Starting training...")
     model, _, _, task_metric = train_model_multitask(
         model=model,
@@ -515,10 +496,13 @@ def main(dataset_root, dataset_name, num_epochs, task_type, seed=42):
         seed=seed
     )
     
+    task_metric['flops'] = flops
+    
     save_results('sagenet', dataset_name, task_type, seed, task_metric)
     
 
 if __name__ == "__main__":
+    data_download()
     parser = argparse.ArgumentParser()
     
     # Mode selection

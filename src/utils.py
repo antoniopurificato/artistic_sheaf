@@ -9,13 +9,32 @@ import numpy as np
 import argparse
 import os
 from fvcore.nn import FlopCountAnalysis
+import gdown
+import subprocess
+import json
 
-def obtain_flops(batch, model, device):
-    x_img, x_text, edge_index, edge_attr = process_batch(
-    batch,
-    split="sheaf",
-    check_images_=True,
-    )
+def data_download(base_folder="data"):
+    datasets = ['SemArt', 'Hertziana', 'Wikidataset']
+    os.makedirs(base_folder, exist_ok=True)
+    to_download = False
+    for dataset in datasets:
+        if not os.path.exists(os.path.join(base_folder, dataset)):
+            to_download = True
+    if to_download:
+        identifier = "1Bw_tlY6EeOrmPjwgmI0gPfiVwpCI1lgL"
+        output = "data.zip"
+        gdown.download(id=identifier, output=output)
+        subprocess.run(["unzip", "data.zip"])        
+        
+        
+
+def obtain_flops(batch, model, device, testing='sheaf'):
+    if testing == "sheaf":
+        x_img, x_text, edge_index, edge_attr = process_batch(
+        batch,
+        split="sheaf",
+        check_images_=True,
+        )
 
     model.eval()
 
@@ -73,7 +92,7 @@ def obtain_configuration(wandb_config, default_config):
     
 def process_batch(batch, check_images_=False, split='sheaf'):
     if split == 'sheaf':
-        x_img, x_text, edge_index, edge_attr = batch  # Unpack the batch
+        x_img, x_text, edge_index, edge_attr = batch 
         x_img, x_text, edge_index, edge_attr = reindex_and_deduplicate(x_img, x_text, edge_index, edge_attr)
         if check_images_:
             check_images(x_img, x_text, edge_index)
@@ -156,9 +175,9 @@ class GraphEdgeDataset(torch.utils.data.Dataset):
         edge_attr = self.edge_attrs[idx]
         nodes = torch.unique(edge)
         batch_x = [self.x[int(n)] for n in nodes]
-        
         if len([x for x in batch_x if isinstance(x, torch.Tensor) and x.dim() > 1]) == 0:
             print(batch_x)
+        
         batch_img = torch.stack([x for x in batch_x if isinstance(x, torch.Tensor) and x.dim() > 1], dim=0).squeeze(0).to(torch.float32).to(self.device)  # Add batch dimension
         
         if not torch.isfinite(batch_img).all():
@@ -169,12 +188,10 @@ class GraphEdgeDataset(torch.utils.data.Dataset):
 
         return batch_img, batch_text, edge, edge_attr
 
-def check_images(x_img, x_text, edge_index):# write first image to file
+def check_images(x_img, x_text, edge_index):
     for idx in range(min(10, edge_index.shape[0])):
         i, j = edge_index[idx]
-        # open image with PIL knowing it's a numpy array (3,224,224) and save it
         img = decode_clip_image(x_img[i].cpu())
-        # decode tokens to text
         tokenizer = open_clip.get_tokenizer('ViT-B-32')
         text = tokenizer.decode(x_text[j].cpu().numpy())
         os.makedirs('test_images', exist_ok=True)
@@ -223,6 +240,11 @@ def redirect_edge_index(original_edge_index, original_edge_attr, x, orig_id=None
                 output_edge_attr.append(attr)
         
         return output_edge_index, output_edge_attr
+    
+def save_results(method_name, dataset_name, task_type, seed, task_metric):
+    os.makedirs('results', exist_ok=True)
+    with open(f'results/{method_name}_{dataset_name}_{task_type}_{seed}_metrics.json', 'w') as f:
+        json.dump(task_metric, f)
 
 def seed_everything(seed: int = 42) -> None:
     """
@@ -290,16 +312,11 @@ def check_graph_properties(data):
     data: PyTorch Geometric Data object
     Returns: tuple (is_directed, has_self_loops)
     """
-    # Controlla se il grafo ha self loops
-    # edge_index ha dimensione [2, num_edges]
     edge_index = data.edge_index
     has_self_loops = torch.any(edge_index[0] == edge_index[1]).item()
 
-    # Controlla se il grafo è diretto
-    # Crea un set di tuple di edges
     edges = set(map(tuple, edge_index.t().tolist()))
     
-    # Un grafo è non diretto se per ogni edge (u,v) esiste anche (v,u)
     is_directed = False
     for edge in edges:
         if (edge[1], edge[0]) not in edges:
@@ -307,3 +324,7 @@ def check_graph_properties(data):
             break
 
     return is_directed, has_self_loops
+
+def load_json(path):
+    with open(path, "r") as f:
+        return json.load(f)

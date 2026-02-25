@@ -2,19 +2,12 @@ import os
 import argparse
 import torch
 import torch.nn.functional as F
+from torch_geometric.data import DataLoader
 
-# ---------- project imports ----------
 from src.metrics import *
 from src.utils import *
 from src.data import *
-from competitors.utils_competitors import seed_everything, save_results
-
-from torch_geometric.data import DataLoader
-
-
-# ============================================================
-# ARGUMENTS
-# ============================================================
+from src.utils import *
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -42,10 +35,6 @@ def parse_args():
     return parser.parse_args()
 
 
-# ============================================================
-# DEVICE
-# ============================================================
-
 def get_device():
     if torch.cuda.is_available():
         return "cuda"
@@ -54,16 +43,9 @@ def get_device():
     return "cpu"
 
 
-# ============================================================
-# MODEL LOADER
-# ============================================================
-
 def load_vlm(model_type: str, device: str):
     model_type = model_type.lower()
 
-    # -----------------------------
-    # STANDARD OPENCLIP
-    # -----------------------------
     if model_type == "clip":
         import open_clip
 
@@ -80,9 +62,6 @@ def load_vlm(model_type: str, device: str):
         model = model.to(device).eval()
         return model, preprocess, tokenizer
 
-    # -----------------------------
-    # SIGLIP
-    # -----------------------------
     if model_type == "siglip":
         import open_clip
 
@@ -99,9 +78,6 @@ def load_vlm(model_type: str, device: str):
         model = model.to(device).eval()
         return model, preprocess, tokenizer
 
-    # -----------------------------
-    # LONGCLIP
-    # -----------------------------
     if model_type == "longclip":
         from model import longclip  # Long-CLIP repo
 
@@ -124,11 +100,6 @@ def load_vlm(model_type: str, device: str):
 
     raise ValueError(f"Unknown model_type: {model_type}")
 
-
-# ============================================================
-# MAIN
-# ============================================================
-
 def main():
 
     args = parse_args()
@@ -145,22 +116,15 @@ def main():
 
     seed_everything(42)
 
-    # ----------------------------------------------------------
-    # LOAD DATA
-    # ----------------------------------------------------------
+
     triplets = f"data/{dataset_name}/triplets_{dataset_name.lower()}_test.json"
-    loaded_data = load_json_data(triplets)
+    loaded_data = load_json(triplets)
 
     print(f"Loaded {len(loaded_data)} triplets")
 
-    # ----------------------------------------------------------
-    # LOAD MODEL
-    # ----------------------------------------------------------
     model, preprocess, tokenizer = load_vlm(model_type, device)
+    
 
-    # ----------------------------------------------------------
-    # BUILD GRAPH DATA
-    # ----------------------------------------------------------
     test_graph_data, test_node_to_id, test_edge_labels = build_graph_from_json(
         loaded_data,
         preprocess,
@@ -185,9 +149,6 @@ def main():
         shuffle=False
     )
 
-    # ----------------------------------------------------------
-    # EMBEDDING EXTRACTION
-    # ----------------------------------------------------------
     clip_images = []
     clip_texts = []
 
@@ -229,7 +190,6 @@ def main():
     
     save_results(args.model_type, args.dataset, 'retrieval', 42, recalls)
 
-    
-# ============================================================
 if __name__ == "__main__":
+    data_download()
     main()

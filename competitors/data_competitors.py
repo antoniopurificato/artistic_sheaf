@@ -6,14 +6,14 @@ import numpy as np
 from tqdm import tqdm
 from typing import List, Dict, Tuple
 from PIL import Image, ImageDraw, ImageFont
-
 from torch_geometric.data import Data
 from torchvision import transforms
 from transformers import ColPaliForRetrieval, ColPaliProcessor, ColQwen2ForRetrieval, ColQwen2Processor
 
+from src.utils import *
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'mps')
 
-# Function to load the model (either ColPali or ColQwen2) and processor based on the model type
 def encode_texts_msc(texts, vocab, model_txt, device, max_len=30):
     """
     Encode a list of text strings into embeddings.
@@ -67,7 +67,7 @@ def get_msc_embedder(itm, model_img, model_text, vocab, base_folder='../wikidata
                                  std=[0.229, 0.224, 0.225])
     ])
     with torch.no_grad():
-        if 'Images/' in itm or 'gemalde/' in itm or 'zeichnungen/' in itm or 'WIKIART_sample/' in itm:
+        if 'Images/' in itm or 'gemalde/' in itm or 'zeichnungen/' in itm or 'WIKIART_sample/' in itm::
             img = Image.open(os.path.join(base_folder, dataset_name, itm)).convert("RGB")  # force RGB
             img.verify()  # check if corrupt
             image = transform(img)
@@ -96,7 +96,6 @@ def load_model_and_processor(model_type="colpali", device='cuda'):
         raise ValueError(f"Model type {model_type} is not supported.")
     return model, processor
 
-# Function to get embeddings for images or text using ColPali (or ColQwen2)
 def get_colpali_embedder(itm: str, model, processor,
                          base_folder: str = 'data/wikidata_arthist/',
                          dataset_name:str='SemArt', itm_link = None) -> torch.Tensor:
@@ -105,7 +104,7 @@ def get_colpali_embedder(itm: str, model, processor,
     Handles dtype and device properly for both images and text.
     """
     device = next(model.parameters()).device
-    model_dtype = torch.float16  # Consistent with bnb_4bit_compute_dtype
+    model_dtype = torch.float16  
 
     with torch.no_grad():
         # Check if the input item is an image
@@ -119,20 +118,18 @@ def get_colpali_embedder(itm: str, model, processor,
         if is_image:
             img_path = path_candidate if os.path.isfile(path_candidate) else itm
             img = Image.open(img_path).convert("RGB")
-            # make plot with title the relationship
 
             if itm_link:
-                # Call draw Method to add 2D graphics in an image
                 I1 = ImageDraw.Draw(img)
 
-                # Custom font style and font size
-                myFont = ImageFont.truetype('FreeMono.ttf', 65)
+                try:
+                    myFont = ImageFont.truetype('FreeMono.ttf', size=65)
+                except OSError:
+                    myFont = ImageFont.load_default(size=65)
+                
 
-                # Add Text to an image
                 I1.text((10, 10), itm_link, font=myFont, fill =(255, 0, 0))
 
-                # # Save the edited image
-                # img.save("example.png")
                 
             inputs = processor(images=[img], return_tensors="pt")
             inputs = {k: (v.to(device).to(model_dtype) if v.dtype.is_floating_point else v.to(device))
@@ -152,11 +149,6 @@ def get_colpali_embedder(itm: str, model, processor,
             emb = outputs.embeddings.mean(dim=1).squeeze(0)
 
             return emb
-
-# Function to load JSON data
-def load_json_data(json_path: str) -> List[Dict]:
-    with open(json_path, 'r') as f:
-        return json.load(f)
 
 # Function to build graph from the JSON data, using ColPali embeddings
 def build_graph_from_json(
@@ -274,10 +266,11 @@ def main(file_name: str, data_folder: str = "data", plot_subgr: bool = True, bas
     model_type = "colpali"  
     model, processor = load_model_and_processor(model_name, model_type=model_type, device=device)
 
-    data_list = load_json_data(json_path)[:2000]  # Modify the number of samples as needed
+    data_list = load_json(json_path)[:2000]  # Modify the number of samples as needed
     graph_data, node_to_id, raw_edge_labels = build_graph_from_json(data_list, model, processor, base_folder,
                                                                     dataset_name="SemArt")
 
 # Execute the script if run directly
 if __name__ == "__main__":
+    data_download()
     main(file_name="triplets_semart_test.json", base_folder="../SemArt/")

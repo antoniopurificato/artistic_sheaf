@@ -11,11 +11,12 @@ from torchvision import models, transforms
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import normalize
 
-from competitors.utils_competitors import seed_everything, save_results
+from src.utils import *
 from competitors.coli_approaches import evaluate_graph_with_colpali
-from competitors.data_competitors import load_json_data, build_graph_from_json
-from src.utils import GraphEdgeDataset
+from competitors.data_competitors import build_graph_from_json
+from src.utils import GraphEdgeDataset, load_json
 from src.metrics import *
+from competitors.utils_competitors import obtain_flops_msc
 
 
 class MSCTripletDataset(Dataset):
@@ -431,6 +432,8 @@ def train(args):
     ).to(device)
     model_txt = TextEncoder(len(vocab.word2idx)).to(device)
     
+    flops = obtain_flops_msc(loader, model_img, model_txt, vocab, args, device)
+    
     # Optimizer
     optim = torch.optim.Adam(
         list(model_img.parameters()) + list(model_txt.parameters()), 
@@ -514,8 +517,9 @@ def train(args):
         "args": vars(args)
     }, checkpoint_path)
     print("✅ Training completed successfully!")
+    return flops
 
-def evaluate(args):
+def evaluate(args, flops):
     """
     Evaluate trained model on test set.
     
@@ -550,7 +554,7 @@ def evaluate(args):
     
     
     # Load graph data and prepare dataset
-    loaded_data = load_json_data(os.path.join(args.base_folder, args.dataset, f"triplets_{args.dataset.lower()}_test.json"))#[:100]
+    loaded_data = load_json(os.path.join(args.base_folder, args.dataset, f"triplets_{args.dataset.lower()}_test.json"))#[:100]
     test_graph_data, _, _ = build_graph_from_json(loaded_data, model=model_img, processor=model_txt, base_folder=args.base_folder, split='test',
                                                   model_type='msc', vocab=vocab, dataset_name=args.dataset)
     test_graph_data = test_graph_data.to(device)
@@ -568,6 +572,8 @@ def evaluate(args):
         if 'recall' in key and 'mean' not in key:
             print(f"{key}: {value}")
             recalls[str(key)] = float(value)
+            
+    recalls['flops'] = flops
     
     save_results('msc', args.dataset, 'retrieval', args.seed, recalls)
 
@@ -578,15 +584,6 @@ def main():
         description="Multi-modal Semantic Consistency Training and Evaluation"
     )
     
-    # Mode selection
-    parser.add_argument(
-        "--mode",
-        type=str,
-        required=True,
-        choices=["train", "eval"],
-        default="train",
-        help="Mode: 'train' for training, 'eval' for evaluation"
-    )
     
     # Data paths
     parser.add_argument(
@@ -691,12 +688,10 @@ def main():
     args = parser.parse_args()
     seed_everything(args.seed)
     
-    if args.mode == "train":
-        train(args)
-    
-    elif args.mode == "eval":
-        evaluate(args)
+    flops = train(args)
+    evaluate(args, flops)
 
 
 if __name__ == "__main__":
+    data_download()
     main()

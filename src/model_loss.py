@@ -8,7 +8,7 @@ from transformers import CLIPTokenizer
 import networkx as nx
 
 from src.metrics import *
-from src.losses import clip_loss, graph_clip_loss, compute_KL_loss
+from src.losses import *
 from src.utils import *
 
 
@@ -42,11 +42,11 @@ class SheafConvLayer(nn.Module):
     
     def predict_restriction_maps(self, x_row, edge_attr):
         edge_inputs = torch.cat([x_row, edge_attr], dim=1)
-        maps = self.sheaf_learner(edge_inputs)  # [num_edges*2, 2*latent_dim]
+        maps = self.sheaf_learner(edge_inputs) 
         return maps
 
     def modify_output(self, input_data, maps, img_text='img'):
-        gamma, beta = maps.chunk(2, dim=-1)     # each [num_edges*2, latent_dim]
+        gamma, beta = maps.chunk(2, dim=-1)     
         n = input_data.shape[0]
         if img_text == 'img':
             g = gamma[:n]
@@ -72,7 +72,6 @@ class SheafConvLayer(nn.Module):
             x_img_ext = x_img
             x_txt_ext = x_txt
         else:
-            # expanding to duplicated vals
             x_img_ext = x_img[self.edge_index[0]]
             x_txt_ext = x_txt[self.edge_index[1]]
         
@@ -146,10 +145,6 @@ class SheafMultimodalGNN(pl.LightningModule):
         self.output_proj = nn.Sequential(
             nn.Linear(latent_dim, latent_dim),
             nn.LeakyReLU(),
-            # nn.Linear(latent_dim, latent_dim * 2),
-            # nn.LeakyReLU(),
-            # nn.Linear(latent_dim * 2, latent_dim),
-            # nn.LeakyReLU(),
             nn.Linear(latent_dim, latent_dim),
         )    
         self.out_proj = out_proj
@@ -207,7 +202,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         assert not torch.isnan(t_img).any(), "NaNs in CLIP image encoder"
         assert not torch.isnan(t_text).any(), "NaNs in CLIP text encoder"
         
-        t_img = self.input_proj_image(t_img) # at some point pass to concatenation immediately
+        t_img = self.input_proj_image(t_img) 
         t_txt = self.input_proj_text(t_text)
         
         assert not torch.isnan(t_img).any(), "NaNs after input_proj"
@@ -380,7 +375,7 @@ class SheafMultimodalGNN(pl.LightningModule):
             sim_matrix_ti_split = txt_emb_rel @ img_emb_rel.T
             
             W_rel = W[rel_mask][:, rel_mask]
-            alpha = self.alpha  # >1 makes distribution more peaked
+            alpha = self.alpha  
             weights_rel = (W_rel.clamp(min=0) ** alpha)
             eps = 1e-8
             weights_rel = weights_rel / (weights_rel.sum(dim=1, keepdim=True) + eps)
@@ -393,7 +388,6 @@ class SheafMultimodalGNN(pl.LightningModule):
             p_t = self.weights_components * weights_rel.T + (1 - self.weights_components) * labels
             p_t = p_t / p_t.sum(dim=1, keepdim=True)
             
-            # loss_split = graph_clip_loss(img_emb_rel, txt_emb_rel, weights_rel)
             loss_clip_split = clip_loss(img_emb_rel, txt_emb_rel)
             loss_kl_split = (compute_KL_loss(p, sim_matrix_it_split)  + compute_KL_loss(p_t, sim_matrix_ti_split)) / 2
             if self.convs[0].verbose:
@@ -403,13 +397,12 @@ class SheafMultimodalGNN(pl.LightningModule):
 
             loss_clip += loss_split * (img_emb_rel.size(0) / img_emb.size(0))
         
-            # Compute metrics on this subset
             rel_metrics_i2t = compute_clip_metrics(img_emb_rel, txt_emb_rel)
             rel_metrics_t2i = compute_clip_metrics(txt_emb_rel, img_emb_rel)
         
             tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
             fingerprint = tokenizer.decode(rel.cpu().numpy()).strip('!').replace('<|startoftext|>', '').replace('<|endoftext|>', '' ).replace('paragraph ', '' ).replace(' en', '' ).strip()
-            #print(fingerprint, value)
+
             for name, value in rel_metrics_i2t.items():
                 self.log(f'{split}_rel_{fingerprint}_i2t_{name}', value, prog_bar=False, on_epoch=True, on_step=False)
             for name, value in rel_metrics_t2i.items():
@@ -452,7 +445,7 @@ class SheafMultimodalGNN(pl.LightningModule):
         if self.convs[0].verbose:
             log_verbose(
                 self,
-                loss_clip,           # your main CLIP loss tensor
+                loss_clip, 
                 layer_prefixes={
                     "clip_proj": ["clip_model.visual.proj", "clip_model.text_projection"],
                     "input_proj": ["input_proj"],
@@ -524,7 +517,7 @@ class SheafMultimodalGNN(pl.LightningModule):
             
             self.num_nodes = t_img.size(0) + t_text.size(0)
                 
-            t_img = self.input_proj_image(t_img) # at some point pass to concatenation immediately
+            t_img = self.input_proj_image(t_img) 
             t_txt = self.input_proj_text(t_text)
             
             h_list_img = []

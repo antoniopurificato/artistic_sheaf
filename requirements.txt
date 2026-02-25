@@ -9,3 +9,5 @@ fvcore
 accelerate
 colpali-engine
 scikit-learn
+gdown
+calflops
