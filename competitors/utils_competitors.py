@@ -719,7 +719,6 @@ def obtain_flops_msc(loader, model_img, model_txt, vocab, args, device):
     model_img.eval()
     model_txt.eval()
 
-    # ---- Prepara un batch reale ----
     images, caps, idxs = next(iter(loader))
     images = images.to(device)
     B = images.size(0)
@@ -771,3 +770,91 @@ def obtain_flops_msc(loader, model_img, model_txt, vocab, args, device):
         )
 
     return flops_img + flops_txt
+
+def obtain_flops_clip(model, preprocess, tokenizer, device, model_type="clip"):
+    """
+    Compute total FLOPs (image encoder + text encoder) for CLIP-family models.
+
+    Creates dummy inputs, wraps encode_image / encode_text in standalone
+    modules so that calflops can trace them independently, then sums.
+
+    Args:
+        model: The VLM model (open_clip or longclip).
+        preprocess: Image preprocessing transform.
+        tokenizer: Text tokenizer.
+        device: Torch device.
+        model_type: One of 'clip', 'siglip', 'longclip'.
+
+    Returns:
+        str: Total FLOPs as formatted string (from calflops).
+        float: Raw total FLOPs (numeric).
+    """
+    model.eval()
+
+    # --- Disable KV-cache if present ---
+    original_use_cache = getattr(model.config, 'use_cache', None) \
+        if hasattr(model, 'config') else None
+    if original_use_cache is not None:
+        model.config.use_cache = False
+
+    # ---- Dummy image ----
+    dummy_image = Image.new('RGB', (224, 224), color='white')
+    img_tensor = preprocess(dummy_image).unsqueeze(0).to(device)  # (1, 3, H, W)
+
+    # ---- Dummy text ----
+    dummy_text = "A painting of a landscape"
+    txt_tensor = tokenizer([dummy_text]).to(device)  # (1, seq_len)
+
+    # ---- Wrapper modules for calflops ----
+    class ImageEncoder(torch.nn.Module):
+        def __init__(self, vlm):
+            super().__init__()
+            self.vlm = vlm
+
+        def forward(self, x):
+            return self.vlm.encode_image(x)
+
+    class TextEncoder(torch.nn.Module):
+        def __init__(self, vlm):
+            super().__init__()
+            self.vlm = vlm
+
+        def forward(self, x):
+            return self.vlm.encode_text(x)
+
+    img_encoder = ImageEncoder(model).to(device).eval()
+    txt_encoder = TextEncoder(model).to(device).eval()
+
+    # ---- Image FLOPs ----
+    flops_img_str, macs_img, params_img = calculate_flops(
+    model=img_encoder,
+    args=[img_tensor],       
+    print_results=False,
+    )
+
+    # ---- Text FLOPs ----
+    flops_txt_str, macs_txt, params_txt = calculate_flops(
+        model=txt_encoder,
+        args=[txt_tensor],      
+        print_results=False,
+    )
+
+    # ---- Restore config ----
+    if original_use_cache is not None:
+        model.config.use_cache = original_use_cache
+
+    def parse_flops_str(s):
+        """Parse calflops string like '4.12 GFLOPS' to float."""
+        s = s.strip().upper()
+        multipliers = {'K': 1e3, 'M': 1e6, 'G': 1e9, 'T': 1e12}
+        for suffix, mult in multipliers.items():
+            if suffix + 'FLOPS' in s:
+                return float(s.replace(suffix + 'FLOPS', '').strip()) * mult
+        # fallback: just a number
+        return float(s.replace('FLOPS', '').strip())
+    
+    flops_img_num = parse_flops_str(flops_img_str)
+    flops_txt_num = parse_flops_str(flops_txt_str)
+    total_flops = flops_img_num + flops_txt_num
+
+    return total_flops
