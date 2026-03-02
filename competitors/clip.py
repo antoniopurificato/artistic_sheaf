@@ -150,6 +150,8 @@ def main():
         shuffle=False
     )
 
+    flops = obtain_flops_clip(model, preprocess, tokenizer, device, model_type)
+
     clip_images = []
     clip_texts = []
 
@@ -182,7 +184,7 @@ def main():
 
     results = compute_test_metrics(clip_images, clip_texts, loaded_data, verbose=False, img_path=f'')
     
-    recalls = {}
+    recalls = {'flops' : flops}
     print('\nEvaluation metrics:')
     for key, value in results.items():
         if 'recall' in key and 'mean' not in key:
