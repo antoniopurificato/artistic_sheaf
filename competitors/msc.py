@@ -590,7 +590,7 @@ def main():
         "--dataset",
         type=str,
         default="SemArt",
-        choices=["Hertziana", "SemArt", "Wikidataset"],
+        choices=["HertzianaDP", "SemArt", "WikiArtPlus"],
         help="Path to training data JSON file (required for train mode)"
     )
 
