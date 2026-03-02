@@ -8,6 +8,7 @@ from src.metrics import *
 from src.utils import *
 from src.data import *
 from src.utils import *
+from competitors.utils_competitors import *
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -16,7 +17,7 @@ def parse_args():
         "--dataset",
         type=str,
         required=True,
-        help="Dataset name (e.g. Hertziana, SemArt)"
+        help="Dataset name (e.g. HertzianaDP, SemArt)"
     )
 
     parser.add_argument(
