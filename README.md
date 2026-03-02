@@ -35,7 +35,7 @@ python3 main.py --sweep True --params_sweep POSSIBLE_SWEEP_CHOICES --dataset DAT
 Example:
 
 ```
-python3 main.py --sweep True --params_sweep batch_size --dataset Hertziana
+python3 main.py --sweep True --params_sweep batch_size --dataset HertzianaDP
 ```
 
 `POSSIBLE_SWEEP_CHOICES` could be `batch_size, lr, sheaf_layers, finetune_layers`. You can select the values in `params.yaml`
