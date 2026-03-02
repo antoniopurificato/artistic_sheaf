@@ -21,7 +21,7 @@ def get_clip_embedder(itm, preprocess, tokenizer, base_folder='../wikidata_arthi
                       dataset_name:str="SemArt"):
     
     with torch.no_grad():
-        if 'Images/' in itm or 'gemalde/' in itm or 'zeichnungen/' in itm or 'WIKIART_sample/' in itm:
+        if 'Images/' in itm or 'gemalde/' in itm or 'zeichnungen/' in itm or 'wikiartplus_sample/' in itm:
             try:
                 if len(itm.split('.')) == 1:
                     itm = itm + '.jpg'
