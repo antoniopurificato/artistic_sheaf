@@ -235,7 +235,7 @@ if __name__ == "__main__":
         "--dataset",
         type=str,
         default="SemArt",
-        choices=["SemArt", "Hertziana", "Wikidataset"],
+        choices=["SemArt", "Hertziana", "WikiArtPlus"],
         help="Name of the dataset.",
     )
     
