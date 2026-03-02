@@ -14,14 +14,14 @@ import subprocess
 import json
 
 def data_download(base_folder="data"):
-    datasets = ['SemArt', 'Hertziana', 'Wikidataset']
+    datasets = ['SemArt', 'HertzianaDP', 'WikiArtPlus']
     os.makedirs(base_folder, exist_ok=True)
     to_download = False
     for dataset in datasets:
         if not os.path.exists(os.path.join(base_folder, dataset)):
             to_download = True
     if to_download:
-        identifier = "1Bw_tlY6EeOrmPjwgmI0gPfiVwpCI1lgL"
+        identifier = "15ae2y3SYc-3OyVkPd3Lw1dYUlHEF_Oll"
         output = "data.zip"
         gdown.download(id=identifier, output=output)
         subprocess.run(["unzip", "data.zip"])        
