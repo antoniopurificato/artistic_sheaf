@@ -18,7 +18,7 @@ from src.metrics import *
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, required=True, choices=["Hertziana", "Wikidataset"])
+    parser.add_argument("--dataset", type=str, required=True, choices=["Hertziana", "WikiArtPlus"])
     parser.add_argument("--mode", type=str, required=True, choices=["predict", "graph"])
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--batch_size", type=int, default=5000)
