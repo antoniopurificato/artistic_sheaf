@@ -375,13 +375,13 @@ def main(dataset_root, dataset_name, num_epochs, task_type, seed=42):
         TASKS = ["author", "school", "genre", "timeframe", "material"]          
     elif task_type == 'retrieval' and dataset_name  == 'SemArt':
         TASKS = ['content', 'context', 'description', 'form'] 
-    elif task_type == 'classification' and dataset_name  == 'Hertziana':
+    elif task_type == 'classification' and dataset_name  == 'HertzianaDP':
         TASKS = ["acquisition period", "artist"]
-    elif task_type == 'retrieval' and dataset_name  == 'Hertziana':
+    elif task_type == 'retrieval' and dataset_name  == 'HertzianaDP':
         TASKS = list(set([k['link'] for k in train_entries if k['link'] not in ["acquisition period", "artist", "medium"]]))
-    elif task_type == 'classification' and dataset_name  == 'Wikidataset':
+    elif task_type == 'classification' and dataset_name  == 'WikiArtPlus':
         TASKS = ["artist", "date", "genre", "artwork_style"]
-    elif task_type == 'retrieval' and dataset_name  == 'Wikidataset':
+    elif task_type == 'retrieval' and dataset_name  == 'WikiArtPlus':
         TASKS = list(set([k['link'] for k in train_entries if (k['link'] not in ["artist", "date", "genre", "artwork_style", "type"]) and ('.' not in k['link'])]))
     else:
         raise ValueError(f"Unsupported dataset/task combination: {dataset_name} - {task_type}")
@@ -510,7 +510,7 @@ if __name__ == "__main__":
         "--dataset",
         type=str,
         required=True,
-        choices=["SemArt", "Hertziana", "Wikidataset"],
+        choices=["SemArt", "HertzianaDP", "WikiArtPlus"],
         default="SemArt",
         help="Dataset name"
     )
