@@ -244,7 +244,7 @@ def redirect_edge_index(original_edge_index, original_edge_attr, x, orig_id=None
 def save_results(method_name, dataset_name, task_type, seed, task_metric):
     os.makedirs('results', exist_ok=True)
     with open(f'results/{method_name}_{dataset_name}_{task_type}_{seed}_metrics.json', 'w') as f:
-        json.dump(task_metric, f)
+        json.dump(task_metric, f, default=lambda x: x.item() if hasattr(x, 'item') else str(x))
 
 def seed_everything(seed: int = 42) -> None:
     """
