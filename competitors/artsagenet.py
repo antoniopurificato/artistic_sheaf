@@ -7,6 +7,7 @@ from datetime import datetime
 import argparse
 from torchvision import transforms, models
 import torch.nn.functional as F
+import os
 from torch_geometric.nn import SAGEConv
 import json
 
@@ -361,6 +362,7 @@ def train_model_multitask(model, dataloaders_dict, features, labels,
 
     # Load best model weights
     model.load_state_dict(best_model_wts)
+    os.makedirs('checkpoints', exist_ok=True)
     torch.save(best_model_wts, f'checkpoints/sagenet_weights_{dataset_name}_{task_type}_{seed}.pth')
     return model, epoch_loss, epoch, task_metric
 
