@@ -19,11 +19,11 @@ from src.metrics import *
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, required=True, choices=["SemArt", "HertzianaDP", "WikiArtPlus"])
-    parser.add_argument("--mode", type=str, required=True, choices=["predict", "graph"])
+    parser.add_argument("--mode", type=str, required=True, default='graph', choices=["predict", "graph"])
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--batch_size", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--compute_metrics", action="store_true")
+    parser.add_argument("--compute_metrics", default=True, action="store_true")
     parser.add_argument("--normalize", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--latent_dim", type=int, default=512)
@@ -174,11 +174,13 @@ def main():
 
     if args.compute_metrics:
         results = compute_test_metrics(clip_images, clip_texts, loaded_data, verbose=args.verbose, img_path="")
-        recalls = [k for k in results.keys() if "recall" in k and "mean" not in k]
-        print("General metrics:")
-        for rec in recalls:
-            print(rec, results[rec])
-        save_results("sheafclip", args.dataset, "retrieval", args.seed, recalls)
+        metrics = {} 
+        for key, value in results.items():
+            if 'mean' not in key:
+                print(f"{key}: {value}")
+                metrics[str(key)] = float(value)
+                
+        save_results("sheafclip", args.dataset, "retrieval", args.seed, metrics)
 
 
 if __name__ == "__main__":
