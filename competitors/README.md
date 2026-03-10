@@ -47,11 +47,3 @@ For example:
 ```
 python3 -m competitors.msc --base_folder data --dataset SemArt
 ```
-
-
-
-For example:
-
-```
-python3 -m competitors.ekg --base_folder data --dataset SemArt
-```
