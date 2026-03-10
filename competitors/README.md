@@ -1,13 +1,13 @@
 In order to run CLIP or SigLIP:
 
 ```
-python3 -m competitors.clip --dataset NAME_OF_THE_DATASET --base_folder PATH_TO_BASE_FOLDER_OF_DATA --model_type ['clip', 'siglip']
+python3 -m competitors.clip --dataset NAME_OF_THE_DATASET --model_type ['clip', 'siglip']
 ```            
 
 For example:
 
 ```
-python3 -m competitors.clip --dataset SemArt --base_folder data --model_type clip
+python3 -m competitors.clip --dataset SemArt --model_type clip
 ```
 
 In order to run ColQwen or Colpali:
