@@ -32,6 +32,7 @@ For example:
 
 ```
 python3 -m competitors.artsagenet --dataset SemArt --task classification
+```
 
 With `POSSIBLE_TASKS` being `["classification", "retrieval"]`
 
@@ -40,7 +41,6 @@ If you want to run MSC:
 ```
 python3 -m competitors.msc --dataset NAME_OF_THE_DATASET --base_folder data 
 ```
-
 
 For example:
 
