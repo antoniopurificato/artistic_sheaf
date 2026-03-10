@@ -40,4 +40,6 @@ python3 main.py --sweep True --params_sweep batch_size --dataset HertzianaDP
 
 `POSSIBLE_SWEEP_CHOICES` could be `batch_size, lr, sheaf_layers, finetune_layers`. You can select the values in `params.yaml`
 
+Datasets could be `SemArt`, `HertzianaDP` or `WikiArtPlus`.
+
 If you want to test the competitors, the `competitors` folder contains a README that allows to easily run the competitors.
