@@ -47,3 +47,5 @@ For example:
 ```
 python3 -m competitors.msc --base_folder data --dataset SemArt
 ```
+
+Datasets could be `SemArt`, `HertzianaDP` or `WikiArtPlus`.
