@@ -7,7 +7,7 @@ python3 -m competitors.clip --dataset NAME_OF_THE_DATASET --base_folder PATH_TO_
 For example:
 
 ```
-python3 -m competitors.coli_approaches --dataset SemArt --base_folder data --model_type clip
+python3 -m competitors.clip --dataset SemArt --base_folder data --model_type clip
 ```
 
 In order to run ColQwen or Colpali:
