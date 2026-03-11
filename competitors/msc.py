@@ -563,7 +563,7 @@ def evaluate(args, flops):
 
     
     # Perform evaluation
-    metrics = evaluate_graph_with_colpali(graph_data, loaded_data)
+    metrics, _ = evaluate_graph_with_colpali(graph_data, loaded_data)
 
     
     recalls = {}
