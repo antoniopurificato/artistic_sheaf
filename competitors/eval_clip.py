@@ -32,6 +32,14 @@ def parse_args():
     p.add_argument("--clip_pretrained", type=str, default="laion2b_s34b_b79k")
     p.add_argument("--clip_train_triplets", type=str, default=None)
     p.add_argument("--clip_val_triplets", type=str, default=None)
+    p.add_argument(
+                "--model_type",
+                type=str,
+                default="clip",
+                choices=["clip", "siglip", "longclip"],
+                help="Vision-language model backend for evaluation. "
+                    "Finetuning is only supported for model_type=clip."
+            )
 
     p.add_argument("--clip_out", type=str, default=None, help="Logs/output dir for open_clip_train")
     p.add_argument("--clip_run_name", type=str, default=None, help="Run name (folder) inside clip_out")
@@ -48,15 +56,65 @@ def parse_args():
                    help="Path to finetuned OpenCLIP checkpoint (.pt). "
                         "If omitted and --finetune_clip is set, script will try to auto-find latest checkpoint.")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--batch_divisor", type=int, default=8000, help="Controls number of eval batches")
+    p.add_argument("--batch_divisor", type=int, default=4000, help="Controls number of eval batches")
     p.add_argument("--save_embeds", action="store_true", help="Save embeddings to .npy")
 
     return p.parse_args()
 
+def load_vlm_for_eval(args, device: str):
+    """
+    Returns: (model, preprocess, tokenizer, ckpt_used)
+    ckpt_used is a string or None used for naming results.
+    """
 
-# =====================================================
-# DEVICE
-# =====================================================
+    model_type = args.model_type.lower()
+
+    # -----------------------------
+    # CLIP / OpenCLIP (optionally finetuned)
+    # -----------------------------
+    if model_type == "clip":
+        ckpt = args.clip_ckpt
+        if ckpt is None and args.finetune_clip:
+            ckpt = find_latest_openclip_checkpoint(args.clip_out or f"data/{args.dataset}/openclip_ft",
+                                                   make_run_name(args.dataset, args.clip_model, args.clip_run_name))
+            print(f"Auto-selected latest CLIP ckpt: {ckpt}")
+
+        model, preprocess, tokenizer = load_openclip_model_with_ckpt(
+            args.clip_model, args.clip_pretrained, ckpt, device
+        )
+        return model, preprocess, tokenizer, ckpt
+
+    # -----------------------------
+    # SIGLIP via OpenCLIP
+    # -----------------------------
+    if model_type == "siglip":
+        model_name = "ViT-SO400M-14-SigLIP"
+        pretrained = "webli"
+
+        model, _, preprocess = open_clip.create_model_and_transforms(
+            model_name,
+            pretrained=pretrained
+        )
+        tokenizer = open_clip.get_tokenizer(model_name)
+        model = model.to(device).eval()
+        return model, preprocess, tokenizer, None
+
+    # -----------------------------
+    # LONGCLIP (external repo)
+    # -----------------------------
+    if model_type == "longclip":
+        from model import longclip  # Long-CLIP repo (as in your other script)
+
+        ckpt = os.environ.get("LONGCLIP_CKPT", "./checkpoints/longclip-B.pt")
+        if not os.path.exists(ckpt):
+            raise FileNotFoundError(f"LongCLIP checkpoint missing: {ckpt}")
+
+        model, preprocess = longclip.load(ckpt, device=device)
+        tokenizer = lambda texts: longclip.tokenize(texts)
+        model = model.to(device).eval()
+        return model, preprocess, tokenizer, ckpt
+
+    raise ValueError(f"Unknown model_type: {args.model_type}")
 
 def get_device():
     if torch.cuda.is_available():
@@ -64,11 +122,6 @@ def get_device():
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return "mps"
     return "cpu"
-
-
-# =====================================================
-# CSV WRITER (robust + correct paths)
-# =====================================================
 
 def triplets_json_to_openclip_tsv(triplets_json: str, tsv_path: str, *, dataset_name: str, base_folder: str = "data"):
     data = load_json_data(triplets_json)
@@ -108,9 +161,34 @@ def triplets_json_to_openclip_tsv(triplets_json: str, tsv_path: str, *, dataset_
     print(f"[OK] Wrote {len(data)} rows to: {out_path}")
     return str(out_path), len(data)
 
-# =====================================================
-# FINETUNE (official open_clip_train)
-# =====================================================
+
+def load_openclip_model_with_ckpt(model_name: str, pretrained: str, ckpt_path: str | None, device: str):
+    model, _, preprocess = open_clip.create_model_and_transforms(model_name, pretrained=pretrained)
+    tokenizer = open_clip.get_tokenizer(model_name)
+
+    if ckpt_path:
+        ckpt_path = str(Path(ckpt_path).expanduser().resolve())
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+
+        # OpenCLIP checkpoints can differ; handle common formats
+        if isinstance(ckpt, dict) and "state_dict" in ckpt:
+            state = ckpt["state_dict"]
+        elif isinstance(ckpt, dict) and "model" in ckpt:
+            state = ckpt["model"]
+        else:
+            # sometimes the dict is already the state dict
+            state = ckpt
+
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        print(f"Loaded CLIP ckpt: {ckpt_path}")
+        if missing:
+            print(f"[WARN] Missing keys: {len(missing)}")
+        if unexpected:
+            print(f"[WARN] Unexpected keys: {len(unexpected)}")
+
+    model = model.to(device).eval()
+    return model, preprocess, tokenizer
+
 
 def finetune_openclip_from_triplets(
     *,
@@ -167,62 +245,25 @@ def finetune_openclip_from_triplets(
         "--precision", precision,
         "--logs", out_dir,
         "--name", run_name,
+        
+        # freeze-most / train-last-3
+        "--lock-image",
+        "--lock-image-unlocked-groups", "3",
+        "--lock-text",
+        "--lock-text-unlocked-layers", "3",
+        
+
     ]
+    
+    cmd += ["--lock-image-freeze-bn-stats"]
+    cmd += ["--lock-text-freeze-layer-norm"]
+
     if val_csv:
         cmd += ["--val-data", val_csv]
+        
 
     print("\nRunning:\n  " + " ".join(cmd) + "\n")
     subprocess.run(cmd, check=True)
-
-
-def find_latest_openclip_checkpoint(logs_dir: str, run_name: str) -> str:
-    """
-    OpenCLIP typically writes checkpoints under:
-      <logs_dir>/<run_name>/checkpoints/*.pt
-    We'll pick the most recently modified .pt.
-    """
-    ckpt_dir = Path(logs_dir) / run_name / "checkpoints"
-    if not ckpt_dir.exists():
-        raise FileNotFoundError(f"Checkpoint dir not found: {ckpt_dir}")
-
-    pts = sorted(ckpt_dir.glob("*.pt"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not pts:
-        raise FileNotFoundError(f"No .pt checkpoints found in: {ckpt_dir}")
-
-    return str(pts[0].resolve())
-
-
-# =====================================================
-# LOAD FINETUNED CLIP
-# =====================================================
-
-def load_openclip_model_with_ckpt(model_name: str, pretrained: str, ckpt_path: str | None, device: str):
-    model, _, preprocess = open_clip.create_model_and_transforms(model_name, pretrained=pretrained)
-    tokenizer = open_clip.get_tokenizer(model_name)
-
-    if ckpt_path:
-        ckpt_path = str(Path(ckpt_path).expanduser().resolve())
-        ckpt = torch.load(ckpt_path, map_location="cpu")
-
-        # OpenCLIP checkpoints can differ; handle common formats
-        if isinstance(ckpt, dict) and "state_dict" in ckpt:
-            state = ckpt["state_dict"]
-        elif isinstance(ckpt, dict) and "model" in ckpt:
-            state = ckpt["model"]
-        else:
-            # sometimes the dict is already the state dict
-            state = ckpt
-
-        missing, unexpected = model.load_state_dict(state, strict=False)
-        print(f"Loaded CLIP ckpt: {ckpt_path}")
-        if missing:
-            print(f"[WARN] Missing keys: {len(missing)}")
-        if unexpected:
-            print(f"[WARN] Unexpected keys: {len(unexpected)}")
-
-    model = model.to(device).eval()
-    return model, preprocess, tokenizer
-
 
 def make_run_name(dataset, model, user_name=None):
     if user_name is not None:
@@ -239,6 +280,8 @@ def main():
     args = parse_args()
     device = get_device()
     seed_everything(args.seed)
+    if args.finetune_clip and args.model_type != "clip":
+        raise ValueError("--finetune_clip is only supported when --model_type=clip")
 
     dataset_name = args.dataset
     print(f"\nDataset: {dataset_name}")
@@ -293,14 +336,19 @@ def main():
     # ---------------------------
     test_triplets = f"data/{dataset_name}/triplets_{dataset_name.lower()}_test.json"
     loaded_data = load_json_data(test_triplets)
+    # for i, itm in enumerate(loaded_data):
+    #     loaded_data[i]['item2'] = itm['link'] + ': ' + itm['item2']
+    
+    print(loaded_data[:5])
     print(f"Loaded {len(loaded_data)} test triplets from {test_triplets}")
 
     # ---------------------------
     # Load CLIP (optionally with finetuned weights)
     # ---------------------------
-    clip_model, preprocess, tokenizer = load_openclip_model_with_ckpt(
-        args.clip_model, args.clip_pretrained, clip_ckpt, device
-    )
+    # clip_model, preprocess, tokenizer = load_openclip_model_with_ckpt(
+    #     args.clip_model, args.clip_pretrained, clip_ckpt, device
+    # )
+    vlm_model, preprocess, tokenizer, ckpt_used = load_vlm_for_eval(args, device)
 
     # ---------------------------
     # Build graph (just to reuse your existing batching/pipeline)
@@ -322,27 +370,42 @@ def main():
 
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-    # ---------------------------
-    # Extract paired embeddings per edge (CLIP-only)
-    # ---------------------------
     img_embs = []
     txt_embs = []
+    clip_images = []
+    clip_texts = []
+    edges_global = []   # list of (global_txt_idx, global_img_idx)
+
+    img_offset = 0
+    txt_offset = 0
 
     for batch in test_loader:
         with torch.no_grad():
             x_img, x_text, edge_index, edge_attr = process_batch(
-                batch, split="sheaf", check_images_=False
+                batch, split="sheaf", check_images_=True
             )
+
             x_img = x_img.to(device)
             x_text = x_text.to(device)
 
-            # Encode node embeddings
-            img_node = clip_model.encode_image(x_img)
-            txt_node = clip_model.encode_text(x_text)
+            img_emb = vlm_model.encode_image(x_img)
+            txt_emb = vlm_model.encode_text(x_text)
+
+            clip_images.append(F.normalize(img_emb, dim=1))
+            clip_texts.append(F.normalize(txt_emb, dim=1))
+
+            # edge_index is batch-local -> make global
+            img_ids = (edge_index[0].to(torch.long) + img_offset).cpu()
+            txt_ids = (edge_index[1].to(torch.long) + txt_offset).cpu()
+
+            edges_global.append(torch.stack([txt_ids, img_ids], dim=1))
+
+            img_offset += img_emb.shape[0]
+            txt_offset += txt_emb.shape[0]
 
             # Pair per edge
-            img_edge = img_node[edge_index[0]]
-            txt_edge = txt_node[edge_index[1]]
+            img_edge = img_emb[edge_index[0]]
+            txt_edge = txt_emb[edge_index[1]]
 
             img_embs.append(F.normalize(img_edge, dim=1))
             txt_embs.append(F.normalize(txt_edge, dim=1))
@@ -354,17 +417,39 @@ def main():
     print(f"Text embeddings:  {txt_embs.shape}")
 
     print("Embeddings extracted.")
+    
+    clip_images = torch.cat(clip_images).cpu().numpy()  # (N_img, D)
+    clip_texts  = torch.cat(clip_texts).cpu().numpy()   # (N_txt, D)
+
+    edges_global = torch.cat(edges_global, dim=0).numpy()  # (E, 2) [txt, img]
+
+    gt_imgs_for_txt, gt_txts_for_img = build_gt_maps(
+        edges_global,
+        n_txt=clip_texts.shape[0],
+        n_img=clip_images.shape[0],
+    )
+    recalls = fractional_recall_at_k_many_to_many(
+        clip_images, clip_texts,
+        gt_imgs_for_txt, gt_txts_for_img,
+        ks=(1,5,10),
+    )
+    
+    print(recalls)
+    tag = args.model_type
+    if args.model_type == "clip" and ckpt_used:
+        tag = "clipft"
+   
+    save_results(tag, dataset_name, "retrievalglobalfr", args.seed, recalls)
 
     results = compute_test_metrics(img_embs, txt_embs, loaded_data, verbose=False, img_path=f'')
-    
     recalls = {}
     print('\nEvaluation metrics:')
     for key, value in results.items():
         if 'recall' in key and 'mean' not in key:
             print(f"{key}: {value}")
             recalls[str(key)] = float(value)
-    
-    save_results("clip_ft" if clip_ckpt else "clip", dataset_name, "retrieval", args.seed, recalls)
+            
+    save_results(tag, dataset_name, "retrieval", args.seed, recalls)
 
 
 if __name__ == "__main__":
