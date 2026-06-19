@@ -1,3 +1,9 @@
+In order to run CLIP or SigLIP:
+
+```
+python3 -m competitors.clip --dataset NAME_OF_THE_DATASET --model_type ['clip', 'siglip']
+```
+
 In order to run ColQwen or Colpali:
 
 ```
