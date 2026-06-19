@@ -1,5 +1,3 @@
-
-
 import torch
 import copy
 from tqdm import tqdm
@@ -7,14 +5,110 @@ from datetime import datetime
 import argparse
 from torchvision import transforms, models
 import torch.nn.functional as F
-import os
 from torch_geometric.nn import SAGEConv
 import json
+import os
+
+torch.backends.cudnn.benchmark = True
 
 from competitors.utils_competitors import *
+from src.metrics import *
 from src.utils import *
 
 IGNORE_INDEX = -100
+
+def extract_embeddings_for_metrics(model, test_loader, test_entries, features,
+                                    art2id, label2idx, TASKS, device):
+    """
+    Estrae img_emb e txt_emb compatibili con compute_test_metrics.
+    
+    - img_emb: merged features (visual + graph) prima dei task heads
+    - txt_emb: riga corrispondente dei pesi del task head
+    
+    Il dot product img_emb @ txt_emb.T ≈ logit del modello (meno il bias),
+    quindi è una misura di similarità coerente con le predizioni del modello.
+    """
+    model.eval()
+    
+    # ---- Step 1: estrarre merged features per ogni nodo di test ----
+    merged_features_dict = {}
+
+    with torch.no_grad():
+        for batch_size, n_id, imgs, adjs in tqdm(test_loader, desc="Extracting embeddings"):
+            adjs = [adj.to(device) for adj in adjs]
+            image = torch.stack(imgs).to(device)
+
+            # CNN branch
+            visual_features = model.features(image)
+            visual_features = model.pooling(visual_features)
+            visual_features = visual_features.view(visual_features.size(0), -1)
+
+            # GNN branch
+            node_features = features[n_id]
+            for i, (edge_index, _, size) in enumerate(adjs):
+                target_nodes = node_features[:size[1]]
+                node_features = model.gnn[i]((node_features, target_nodes), edge_index)
+                if i != model.num_layers - 1:
+                    node_features = F.relu(node_features)
+
+            # Merge (stessa strategia usata nel forward)
+            if model.merge == 'concatenate':
+                merged = torch.cat((visual_features, node_features), dim=1)
+            elif model.merge == 'add':
+                merged = visual_features + node_features
+            elif model.merge == 'multiply':
+                merged = visual_features * node_features
+            elif model.merge == 'mean':
+                merged = (visual_features + node_features) / 2.0
+            else:  # 'test' → solo visual
+                merged = visual_features
+
+            # Salva per ogni nodo target del batch
+            for idx in range(batch_size):
+                nid = n_id[idx].item()
+                merged_features_dict[nid] = merged[idx].cpu()
+
+    # ---- Step 2: costruire embedding per-triplet ----
+    img_embs = []
+    txt_embs = []
+    valid_entries = []
+
+    for entry in test_entries:
+        artwork = entry['item1']
+        link    = entry['link']
+        target  = entry['item2']
+
+        # Salta se il link non è tra i task gestiti
+        if link not in TASKS:
+            continue
+
+        node_id = art2id[artwork]
+
+        # Controlla che abbiamo le features per questo nodo
+        if node_id not in merged_features_dict:
+            continue
+
+        # Controlla che il target esista nel vocabolario del task
+        if target not in label2idx[link]:
+            continue
+
+        # Image embedding = merged features del nodo
+        img_emb = merged_features_dict[node_id]
+
+        # Text embedding = riga dei pesi del task head per la classe target
+        class_idx = label2idx[link][target]
+        head = model.tasks[link]
+        txt_emb = head.weight[class_idx].detach().cpu()
+
+        # Normalizza L2 (necessario per il dot-product similarity)
+        img_emb = F.normalize(img_emb.unsqueeze(0), dim=1).squeeze(0)
+        txt_emb = F.normalize(txt_emb.unsqueeze(0), dim=1).squeeze(0)
+
+        img_embs.append(img_emb.numpy())
+        txt_embs.append(txt_emb.numpy())
+        valid_entries.append(entry)
+
+    return np.array(img_embs), np.array(txt_embs), valid_entries
 
 
 class ArtSAGENet(nn.Module):
@@ -110,6 +204,7 @@ class ArtSAGENet(nn.Module):
                 - Multi-task: tuple of 3 tensors for each task
         """
         # Extract visual features using CNN
+  
         visual_features = self.features(image)
         visual_features = self.pooling(visual_features)
         visual_features = visual_features.view(visual_features.size(0), -1)
@@ -377,13 +472,13 @@ def main(dataset_root, dataset_name, num_epochs, task_type, seed=42):
         TASKS = ["author", "school", "genre", "timeframe", "material"]          
     elif task_type == 'retrieval' and dataset_name  == 'SemArt':
         TASKS = ['content', 'context', 'description', 'form'] 
-    elif task_type == 'classification' and dataset_name  == 'HertzianaDP':
+    elif task_type == 'classification' and dataset_name  == 'Hertziana':
         TASKS = ["acquisition period", "artist"]
-    elif task_type == 'retrieval' and dataset_name  == 'HertzianaDP':
+    elif task_type == 'retrieval' and dataset_name  == 'Hertziana':
         TASKS = list(set([k['link'] for k in train_entries if k['link'] not in ["acquisition period", "artist", "medium"]]))
-    elif task_type == 'classification' and dataset_name  == 'WikiArtPlus':
+    elif task_type == 'classification' and dataset_name  == 'Wikidataset':
         TASKS = ["artist", "date", "genre", "artwork_style"]
-    elif task_type == 'retrieval' and dataset_name  == 'WikiArtPlus':
+    elif task_type == 'retrieval' and dataset_name  == 'Wikidataset':
         TASKS = list(set([k['link'] for k in train_entries if (k['link'] not in ["artist", "date", "genre", "artwork_style", "type"]) and ('.' not in k['link'])]))
     else:
         raise ValueError(f"Unsupported dataset/task combination: {dataset_name} - {task_type}")
@@ -396,8 +491,11 @@ def main(dataset_root, dataset_name, num_epochs, task_type, seed=42):
 
     print(f"Total entries: {len(entries_all)}")
     artworks, art2id = build_nodes(entries_all)
+    
+    
 
     list_paths = [os.path.join(dataset_root, dataset_name, p) for p in artworks]
+
 
     labels_list, out_channels, label2idx = build_labels(entries_all, art2id, TASKS, IGNORE_INDEX)
     edge_index = build_edge_index(entries_all, art2id, EDGE_LINKS)
@@ -435,11 +533,11 @@ def main(dataset_root, dataset_name, num_epochs, task_type, seed=42):
     dataset_sizes = {"train": len(train_idx), "val": len(val_idx), "test": len(test_idx)}
     sizes = [50, 50] 
     train_loader = NeighborSamplerImages(list_paths, img_transform, edge_index, sizes,
-                                         node_idx=train_idx, batch_size=256, shuffle=True, num_workers=4, num_nodes = len(list_paths))
+                                         node_idx=train_idx, batch_size=128, shuffle=True, num_workers=4, num_nodes = len(list_paths))
     val_loader   = NeighborSamplerImages(list_paths, img_transform, edge_index, sizes,
-                                         node_idx=val_idx, batch_size=256, shuffle=False, num_workers=4, num_nodes = len(list_paths))
+                                         node_idx=val_idx, batch_size=128, shuffle=False, num_workers=4, num_nodes = len(list_paths))
     test_loader  = NeighborSamplerImages(list_paths, img_transform, edge_index, sizes,
-                                         node_idx=test_idx, batch_size=dataset_sizes['test'], shuffle=False, num_workers=4, num_nodes = len(list_paths))
+                                         node_idx=test_idx, batch_size=128, shuffle=False, num_workers=4, num_nodes = len(list_paths)) #dataset_sizes['test']
     dataloaders = {"train": train_loader, "val": val_loader, "test": test_loader}
     print(f"Dataset sizes: {dataset_sizes}, next iter size train: {next(iter(train_loader))[1].shape}")
     
@@ -451,7 +549,7 @@ def main(dataset_root, dataset_name, num_epochs, task_type, seed=42):
     
     
     batch = next(iter(train_loader))
-    flops = obtain_flops_sagenet(batch, model, device, features=features)
+    # flops = obtain_flops_sagenet(batch, model, device, features=features)
     
     if task_type == 'classification':
         crit = [nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX) for _ in range(len(TASKS))]
@@ -498,13 +596,48 @@ def main(dataset_root, dataset_name, num_epochs, task_type, seed=42):
         seed=seed
     )
     
-    task_metric['flops'] = flops
-    
+    if task_type == 'retrieval':
+        print("\n" + "=" * 60)
+        print("Computing global test metrics via compute_test_metrics...")
+        print("=" * 60)
+
+        model.update_merge_strategy('concatenate')
+
+        img_emb, txt_emb, valid_test_entries = extract_embeddings_for_metrics(
+            model=model,
+            test_loader=dataloaders['test'],
+            test_entries=test_entries,
+            features=features,
+            art2id=art2id,
+            label2idx=label2idx,
+            TASKS=TASKS,
+            device=device
+        )
+
+        print(f"Extracted embeddings: img={img_emb.shape}, txt={txt_emb.shape}, "
+              f"valid entries={len(valid_test_entries)}")
+
+        results = compute_test_metrics(
+            img_emb=img_emb,
+            txt_emb=txt_emb,
+            data_list=valid_test_entries,
+            verbose=True,
+            img_path=os.path.join(dataset_root, dataset_name, "")
+        )
+
+        task_metric.update(results)
+
+        print("\nGlobal test results:")
+        for k, v in results.items():
+            if 'mean' in k:  
+                print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
+
+    #task_metric['flops'] = flops
     save_results('sagenet', dataset_name, task_type, seed, task_metric)
     
 
 if __name__ == "__main__":
-    data_download()
+    #data_download()
     parser = argparse.ArgumentParser()
     
     # Mode selection
@@ -512,7 +645,7 @@ if __name__ == "__main__":
         "--dataset",
         type=str,
         required=True,
-        choices=["SemArt", "HertzianaDP", "WikiArtPlus"],
+        #choices=["SemArt", "HertzianaDP", "Wikidataset"],
         default="SemArt",
         help="Dataset name"
     )
