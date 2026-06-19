@@ -1,51 +1,72 @@
-In order to run CLIP or SigLIP:
-
-```
-python3 -m competitors.clip --dataset NAME_OF_THE_DATASET --model_type ['clip', 'siglip']
-```            
-
-For example:
-
-```
-python3 -m competitors.clip --dataset SemArt --model_type clip
-```
-
 In order to run ColQwen or Colpali:
 
 ```
-python3 -m competitors.competitors --dataset NAME_OF_THE_DATASET --base_folder PATH_TO_BASE_FOLDER_OF_DATA --model_type ['colpali', 'colqwen2']
+python3 -m competitors.coli_approaches --dataset NAME_OF_THE_DATASET --base_folder PATH_TO_BASE_FOLDER_OF_DATA --model_type ['colpali', 'colqwen2']
 ```            
 
 For example:
 
 ```
-python3 -m competitors.coli_approaches --dataset SemArt --base_folder data --model_type colpali
+python3 -m competitors.coli_approaches --dataset SemArt --base_folder data
 ```
-
-If you want to run ArtSAGENet:
-
-```
-python3 -m competitors.artsagenet --dataset NAME_OF_THE_DATASET  --task POSSIBLE_TASKS
-```
-
-For example:
-
-```
-python3 -m competitors.artsagenet --dataset SemArt --task classification
-```
-
-With `POSSIBLE_TASKS` being `["classification", "retrieval"]`
 
 If you want to run MSC:
 
 ```
-python3 -m competitors.msc --dataset NAME_OF_THE_DATASET --base_folder data 
+python3 -m competitors.msc --mode ["train", "eval"] --dataset NAME_OF_THE_DATASET --test_data PATH_TO_TEST_DATA_JSON_FILE --base_folder FOLDER_CONTAINING_JSON 
 ```
+
 
 For example:
 
 ```
-python3 -m competitors.msc --base_folder data --dataset SemArt
+python3 -m competitors.msc --mode train --base_folder data --dataset SemArt
 ```
 
-Datasets could be `SemArt`, `HertzianaDP` or `WikiArtPlus`.
+In order to run CLIP finetuned:
+
+```
+python3 -m competitors.clip_ft --dataset NAME_OF_THE_DATASET --base_folder PATH_TO_BASE_FOLDER_OF_DATA
+```            
+
+For example:
+
+```
+python3 -m competitors.clip_ft --dataset SemArt --base_folder data
+```
+
+In order to run SigLIP finetuned:
+
+```
+python3 -m competitors.siglip_ft --dataset NAME_OF_THE_DATASET --base_folder PATH_TO_BASE_FOLDER_OF_DATA
+```            
+
+For example:
+
+```
+python3 -m competitors.siglip_ft --dataset SemArt --base_folder data
+```
+
+In order to run GraphCLIP:
+
+```
+python3 -m competitors.graphclip --dataset NAME_OF_THE_DATASET --base_folder PATH_TO_BASE_FOLDER_OF_DATA
+```            
+
+For example:
+
+```
+python3 -m competitors.graphclip --dataset SemArt --base_folder data
+```
+
+In order to run RCML:
+
+```
+python3 -m competitors.rcml --dataset NAME_OF_THE_DATASET --base_folder PATH_TO_BASE_FOLDER_OF_DATA
+```            
+
+For example:
+
+```
+python3 -m competitors.rcml --dataset SemArt --base_folder data
+```
