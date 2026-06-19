@@ -11,3 +11,4 @@ colpali-engine
 scikit-learn
 gdown
 calflops
+pandas
