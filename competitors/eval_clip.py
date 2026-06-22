@@ -142,8 +142,8 @@ def triplets_json_to_openclip_tsv(triplets_json: str, tsv_path: str, *, dataset_
         w.writerow(["filepath", "title"])
 
         for t in data:
-            img_rel = t["item1"]
-            caption = t["item2"]
+            img_rel = t["image"]
+            caption = t["text"]
 
             img_path = img_rel if os.path.isabs(img_rel) else str((prefix / img_rel).as_posix())
 
@@ -338,7 +338,7 @@ def main():
     test_triplets = f"data/{dataset_name}/triplets_{dataset_name.lower()}_test.json"
     loaded_data = load_json_data(test_triplets)
     # for i, itm in enumerate(loaded_data):
-    #     loaded_data[i]['item2'] = itm['link'] + ': ' + itm['item2']
+    #     loaded_data[i]['text'] = itm['link'] + ': ' + itm['text']
     
     print(loaded_data[:5])
     print(f"Loaded {len(loaded_data)} test triplets from {test_triplets}")

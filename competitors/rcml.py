@@ -18,14 +18,14 @@ from competitors.utils_competitors import save_results
 
 @dataclass
 class RCMLSample:
-    item1: str
-    item2: str
+    image: str
+    text: str
     link: str
 
 
 class RCMLTripletDataset(Dataset):
     def __init__(self, samples: List[Dict], preprocess, tokenizer, base_folder: str, dataset_name: str):
-        self.samples = [RCMLSample(s["item1"], s["item2"], s["link"]) for s in samples]
+        self.samples = [RCMLSample(s["image"], s["text"], s["link"]) for s in samples]
         self.preprocess = preprocess
         self.tokenizer = tokenizer
         self.base_folder = base_folder
@@ -44,29 +44,29 @@ class RCMLTripletDataset(Dataset):
 
     def __getitem__(self, idx: int):
         s = self.samples[idx]
-        img_path = self._resolve_image_path(s.item1)
+        img_path = self._resolve_image_path(s.image)
         image = Image.open(img_path).convert("RGB")
         image = self.preprocess(image)
-        text_tokens = self.tokenizer([s.item2])[0]
+        text_tokens = self.tokenizer([s.text])[0]
         relation_tokens = self.tokenizer([s.link])[0]
         return {
-            "image": image,
+            "image_tensor": image,
             "text_tokens": text_tokens,
             "relation_tokens": relation_tokens,
             "relation": s.link,
-            "item1": s.item1,
-            "item2": s.item2,
+            "image": s.image,
+            "text": s.text,
         }
 
 
 def rcml_collate(batch: List[Dict]):
-    images = torch.stack([b["image"] for b in batch], dim=0)
+    images = torch.stack([b["image_tensor"] for b in batch], dim=0)
     text_tokens = torch.stack([b["text_tokens"] for b in batch], dim=0)
     relation_tokens = torch.stack([b["relation_tokens"] for b in batch], dim=0)
     relations = [b["relation"] for b in batch]
-    item1 = [b["item1"] for b in batch]
-    item2 = [b["item2"] for b in batch]
-    return images, text_tokens, relation_tokens, relations, item1, item2
+    image_paths = [b["image"] for b in batch]
+    texts = [b["text"] for b in batch]
+    return images, text_tokens, relation_tokens, relations, image_paths, texts
 
 
 class RCMLModel(nn.Module):
@@ -205,7 +205,7 @@ def extract_embeddings(model: RCMLModel, loader: DataLoader, device: str):
     img_embs, txt_embs = [], []
     meta = []
     total_batches = len(loader)
-    for step, (images, text_tokens, relation_tokens, relations, item1, item2) in enumerate(loader, start=1):
+    for step, (images, text_tokens, relation_tokens, relations, image_paths, texts) in enumerate(loader, start=1):
         images = images.to(device)
         text_tokens = text_tokens.to(device)
         relation_tokens = relation_tokens.to(device)
@@ -213,14 +213,14 @@ def extract_embeddings(model: RCMLModel, loader: DataLoader, device: str):
         img_embs.append(zi.cpu())
         txt_embs.append(zt.cpu())
         for i in range(len(relations)):
-            meta.append({"item1": item1[i], "item2": item2[i], "link": relations[i]})
+            meta.append({"image": image_paths[i], "text": texts[i], "link": relations[i]})
         if step == 1 or step % 20 == 0 or step == total_batches:
             print(f"[RCML][eval] step={step}/{total_batches} embedded={len(meta)}")
     return torch.cat(img_embs, dim=0).numpy(), torch.cat(txt_embs, dim=0).numpy(), meta
 
 
 def run_rcml(
-    dataset_name: str = "SemArt",
+    dataset_name: str = "SemArtPlus",
     data_folder: str = "data",
     base_folder: str = "data",
     batch_size: int = 128,
@@ -298,7 +298,7 @@ def run_rcml(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, default="SemArt", choices=["SemArt", "Hertziana", "Wikidataset"])
+    parser.add_argument("--dataset", type=str, default="SemArtPlus", choices=["SemArtPlus", "Hertziana", "Wikidataset"])
     parser.add_argument("--data_folder", type=str, default="data")
     parser.add_argument("--base_folder", type=str, default="data")
     parser.add_argument("--batch_size", type=int, default=128)

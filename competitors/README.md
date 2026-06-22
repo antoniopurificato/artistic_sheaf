@@ -7,7 +7,7 @@ python3 -m competitors.coli_approaches --dataset NAME_OF_THE_DATASET --base_fold
 For example:
 
 ```
-python3 -m competitors.coli_approaches --dataset SemArt --base_folder data
+python3 -m competitors.coli_approaches --dataset SemArtPlus --base_folder data
 ```
 
 If you want to run MSC:
@@ -20,7 +20,7 @@ python3 -m competitors.msc --mode ["train", "eval"] --dataset NAME_OF_THE_DATASE
 For example:
 
 ```
-python3 -m competitors.msc --mode train --base_folder data --dataset SemArt
+python3 -m competitors.msc --mode train --base_folder data --dataset SemArtPlus
 ```
 
 In case you want to run CLIP finetuned, you first need to finetune it:
@@ -58,7 +58,7 @@ python3 -m competitors.clip_ft --dataset NAME_OF_THE_DATASET --base_folder PATH_
 For example:
 
 ```
-python3 -m competitors.clip_ft --dataset SemArt --base_folder data
+python3 -m competitors.clip_ft --dataset SemArtPlus --base_folder data
 ```
 
 In order to run SigLIP finetuned:
@@ -70,7 +70,7 @@ python3 -m competitors.siglip_ft --dataset NAME_OF_THE_DATASET --base_folder PAT
 For example:
 
 ```
-python3 -m competitors.siglip_ft --dataset SemArt --base_folder data
+python3 -m competitors.siglip_ft --dataset SemArtPlus --base_folder data
 ```
 
 In order to run GraphCLIP:
@@ -82,7 +82,7 @@ python3 -m competitors.graphclip --dataset NAME_OF_THE_DATASET --base_folder PAT
 For example:
 
 ```
-python3 -m competitors.graphclip --dataset SemArt --base_folder data
+python3 -m competitors.graphclip --dataset SemArtPlus --base_folder data
 ```
 
 In order to run RCML:
@@ -94,5 +94,5 @@ python3 -m competitors.rcml --dataset NAME_OF_THE_DATASET --base_folder PATH_TO_
 For example:
 
 ```
-python3 -m competitors.rcml --dataset SemArt --base_folder data
+python3 -m competitors.rcml --dataset SemArtPlus --base_folder data
 ```

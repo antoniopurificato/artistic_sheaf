@@ -74,9 +74,9 @@ def extract_embeddings_for_metrics(model, test_loader, test_entries, features,
     valid_entries = []
 
     for entry in test_entries:
-        artwork = entry['item1']
+        artwork = entry['image']
         link    = entry['link']
-        target  = entry['item2']
+        target  = entry['text']
 
         # Salta se il link non è tra i task gestiti
         if link not in TASKS:
@@ -468,9 +468,9 @@ def main(dataset_root, dataset_name, num_epochs, task_type, seed=42):
     val_entries   = load_json(os.path.join(dataset_root, dataset_name, f"triplets_{dataset_name.lower()}_val.json"))
     test_entries  = load_json(os.path.join(dataset_root, dataset_name, f"triplets_{dataset_name.lower()}_test.json"))
     
-    if task_type == 'classification' and dataset_name  == 'SemArt':
+    if task_type == 'classification' and dataset_name  == 'SemArtPlus':
         TASKS = ["author", "school", "genre", "timeframe", "material"]          
-    elif task_type == 'retrieval' and dataset_name  == 'SemArt':
+    elif task_type == 'retrieval' and dataset_name  == 'SemArtPlus':
         TASKS = ['content', 'context', 'description', 'form'] 
     elif task_type == 'classification' and dataset_name  == 'Hertziana':
         TASKS = ["acquisition period", "artist"]
@@ -501,7 +501,7 @@ def main(dataset_root, dataset_name, num_epochs, task_type, seed=42):
     edge_index = build_edge_index(entries_all, art2id, EDGE_LINKS)
 
     def split_node_idx(split_entries):
-        s = sorted({art2id[e["item1"]] for e in split_entries})
+        s = sorted({art2id[e["image"]] for e in split_entries})
         return torch.tensor(s, dtype=torch.long)
 
     train_idx = split_node_idx(train_entries)
@@ -645,8 +645,8 @@ if __name__ == "__main__":
         "--dataset",
         type=str,
         required=True,
-        #choices=["SemArt", "HertzianaDP", "Wikidataset"],
-        default="SemArt",
+        #choices=["SemArtPlus", "HertzianaDP", "Wikidataset"],
+        default="SemArtPlus",
         help="Dataset name"
     )
     parser.add_argument(

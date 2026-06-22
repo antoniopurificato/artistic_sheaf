@@ -58,7 +58,7 @@ def encode_images_msc(images, model_img, device):
         return model_img(images.to(device))
 
 def get_msc_embedder(itm, model_img, model_text, vocab, base_folder='../wikidata_arthist/',
-                     dataset_name:str='SemArt'):
+                     dataset_name:str='SemArtPlus'):
     
     transform = transforms.Compose([
             transforms.Resize((224, 224)),
@@ -67,7 +67,7 @@ def get_msc_embedder(itm, model_img, model_text, vocab, base_folder='../wikidata
                                  std=[0.229, 0.224, 0.225])
     ])
     with torch.no_grad():
-        if 'Images/' in itm or 'gemalde/' in itm or 'zeichnungen/' in itm or 'WIKIART_sample/' in itm:
+        if 'Images/' in itm or 'gemalde/' in itm or 'zeichnungen/' in itm or 'WIKIART_sample/' in itm or 'images/' in itm:
             img = Image.open(os.path.join(base_folder, dataset_name, itm)).convert("RGB")  # force RGB
             img.verify()  # check if corrupt
             image = transform(img)
@@ -99,7 +99,7 @@ def load_model_and_processor(model_type="colpali", device='cuda'):
 # Function to get embeddings for images or text using ColPali (or ColQwen2)
 def get_colpali_embedder(itm: str, model, processor,
                          base_folder: str = 'data/wikidata_arthist/',
-                         dataset_name:str='SemArt', itm_link = None) -> torch.Tensor:
+                         dataset_name:str='SemArtPlus', itm_link = None) -> torch.Tensor:
     """
     Embeds either an image or text input using ColPali (HF API, 4-bit safe).
     Handles dtype and device properly for both images and text.
@@ -112,7 +112,7 @@ def get_colpali_embedder(itm: str, model, processor,
         path_candidate = os.path.join(base_folder, dataset_name, itm)
         is_image = (
             os.path.isfile(path_candidate)
-            or 'Images/' in itm or 'gemalde/' in itm or 'zeichnungen/' in itm or 'WIKIART_sample/' in itm
+            or 'Images/' in itm or 'gemalde/' in itm or 'zeichnungen/' in itm or 'WIKIART_sample/' in itm or 'images/' in itm
             or itm.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'))
         )
 
@@ -164,11 +164,11 @@ def build_graph_from_json(
     model,
     processor,
     base_folder: str,
-    item2: str = 'item2',
+    item2: str = 'text',
     split: str = 'normal',
     model_type:str = 'colpali',
     vocab = None,
-    dataset_name:str="SemArt"
+    dataset_name:str="SemArtPlus"
 
 ) -> Tuple[Data, Dict[str, int], List[str]]:
     """
@@ -184,7 +184,7 @@ def build_graph_from_json(
     node_id_counter = 0
 
     for item in tqdm(data_list):
-        for key in ['item1', item2]:
+        for key in ['image', item2]:
             val = str(item.get(key, ""))
 
             if val not in node_to_id:
@@ -201,7 +201,7 @@ def build_graph_from_json(
                 node_id_counter += 1
 
         # Creating the edges of the graph
-        src = node_to_id[str(item.get('item1', ''))]
+        src = node_to_id[str(item.get('image', ''))]
         dst = node_to_id[str(item.get(item2, ''))]
         edge_index_list.append([src, dst])
         if split == 'cluster':
@@ -276,8 +276,8 @@ def main(file_name: str, data_folder: str = "data", plot_subgr: bool = True, bas
 
     data_list = load_json_data(json_path)[:2000]  # Modify the number of samples as needed
     graph_data, node_to_id, raw_edge_labels = build_graph_from_json(data_list, model, processor, base_folder,
-                                                                    dataset_name="SemArt")
+                                                                    dataset_name="SemArtPlus")
 
 # Execute the script if run directly
 if __name__ == "__main__":
-    main(file_name="triplets_semart_test.json", base_folder="../SemArt/")
+    main(file_name="triplets_SemArtPlus_test.json", base_folder="../SemArtPlus/")

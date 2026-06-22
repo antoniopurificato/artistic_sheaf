@@ -22,7 +22,7 @@ IGNORE_INDEX = -100
 
 
 def get_classification_tasks(dataset_name: str) -> List[str]:
-    if dataset_name == "SemArt":
+    if dataset_name == "SemArtPlus":
         return ["author", "school", "genre", "timeframe", "material"]
     if dataset_name == "Hertziana":
         return ["acquisition period", "artist"]
@@ -54,8 +54,8 @@ def build_artwork_label_map(entries: List[Dict], tasks: List[str]) -> Dict[str, 
         link = e.get("link")
         if link not in tasks:
             continue
-        art = e["item1"]
-        cls = str(e["item2"])
+        art = e["image"]
+        cls = str(e["text"])
         out.setdefault(art, {})
         out[art][link] = cls
     return out
@@ -278,7 +278,7 @@ def evaluate(model, loader, graph, tasks, device):
 
 
 def run_graphclip_multitask(
-    dataset_name: str = "SemArt",
+    dataset_name: str = "SemArtPlus",
     data_folder: str = "data",
     base_folder: str = "data",
     batch_size: int = 128,
@@ -411,7 +411,7 @@ def run_graphclip_multitask(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, default="SemArt", choices=["SemArt", "Hertziana", "Wikidataset"])
+    parser.add_argument("--dataset", type=str, default="SemArtPlus", choices=["SemArtPlus", "Hertziana", "Wikidataset"])
     parser.add_argument("--data_folder", type=str, default="data")
     parser.add_argument("--base_folder", type=str, default="data")
     parser.add_argument("--batch_size", type=int, default=128)

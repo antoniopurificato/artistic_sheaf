@@ -21,11 +21,11 @@ from competitors.utils_competitors import obtain_flops_msc
 
 class MSCTripletDataset(Dataset):
     """
-    Dataset for MSC triplet format (item1-item2-link).
+    Dataset for MSC triplet format (image-text-link).
     Groups multiple captions per image.
     """
     
-    def __init__(self, json_path: str, base_folder: str = ".", max_captions=30, img_size=224, dataset_name:str="SemArt"):
+    def __init__(self, json_path: str, base_folder: str = ".", max_captions=30, img_size=224, dataset_name:str="SemArtPlus"):
         """
         Initialize the dataset.
         
@@ -42,8 +42,8 @@ class MSCTripletDataset(Dataset):
         grouped = {}
         links = {}
         for d in data:
-            img_path = os.path.join(base_folder, dataset_name, d["item1"])
-            cap = d["item2"]
+            img_path = os.path.join(base_folder, dataset_name, d["image"])
+            cap = d["text"]
             grouped.setdefault(img_path, []).append(cap)
             link = d["link"]
             links.setdefault(img_path, []).append(link)
@@ -589,8 +589,8 @@ def main():
     parser.add_argument(
         "--dataset",
         type=str,
-        default="SemArt",
-        choices=["HertzianaDP", "SemArt", "WikiArtPlus"],
+        default="SemArtPlus",
+        choices=["HertzianaDP", "SemArtPlus", "WikiArtPlus"],
         help="Path to training data JSON file (required for train mode)"
     )
 

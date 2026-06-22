@@ -325,7 +325,7 @@ class NeighborSamplerImages(torch.utils.data.DataLoader):
         return f'{self.__class__.__name__}(sizes={self.sizes})'
 
 def build_nodes(entries_all):
-    artworks = sorted({e["item1"] for e in entries_all})
+    artworks = sorted({e["image"] for e in entries_all})
     art2id = {p:i for i,p in enumerate(artworks)}
     return artworks, art2id
 
@@ -337,9 +337,9 @@ def build_labels(entries_all, art2id, tasks, ignore_index):
         t = str(e["link"])
         if t not in tasks:
             continue
-        nid = art2id[e["item1"]]
+        nid = art2id[e["image"]]
         if nid not in per_task[t]:
-            per_task[t][nid] = str(e["item2"])
+            per_task[t][nid] = str(e["text"])
 
     # vocab per task
     label2idx = {}
@@ -365,8 +365,8 @@ def build_edge_index(entries_all, art2id, edge_links):
         link = str(e["link"])
         if link not in edge_links:
             continue
-        nid = art2id[e["item1"]]
-        key = (link, str(e["item2"]))
+        nid = art2id[e["image"]]
+        key = (link, str(e["text"]))
         groups[key].append(nid)
 
     src, dst = [], []

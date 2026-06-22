@@ -75,8 +75,8 @@ def triplets_json_to_openclip_tsv(triplets_json: str, tsv_path: str, *, dataset_
         w.writerow(["filepath", "title"])
 
         for t in data:
-            img_rel = t["item1"]
-            caption = t["item2"]
+            img_rel = t["image"]
+            caption = t["text"]
 
             img_path = img_rel if os.path.isabs(img_rel) else str((prefix / img_rel).as_posix())
 

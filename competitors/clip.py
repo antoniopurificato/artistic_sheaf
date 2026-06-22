@@ -22,7 +22,7 @@ def parse_args():
         "--dataset",
         type=str,
         required=True,
-        help="Dataset name (e.g. Hertziana, SemArt)"
+        help="Dataset name (e.g. Hertziana, SemArtPlus)"
     )
 
     parser.add_argument(
