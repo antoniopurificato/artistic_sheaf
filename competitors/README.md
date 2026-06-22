@@ -23,6 +23,32 @@ For example:
 python3 -m competitors.msc --mode train --base_folder data --dataset SemArt
 ```
 
+In case you want to run CLIP finetuned, you first need to finetune it:
+
+```
+python -m competitors.clip_ft \
+    --dataset DATASET_NAME \
+    --finetune_clip \
+    --clip_model ViT-B-32 \
+    --clip_pretrained laion2b_s34b_b79k \
+    --clip_epochs 5 \
+    --clip_lr 1e-5 \
+    --clip_batch_size 128
+```
+
+In case you want to run SigLip finetuned, you first need to finetune it:
+
+```
+python competitorsd.siglip_finetune \
+    --dataset DATASET_NAME \
+    --finetune_siglip \
+    --siglip_model ViT-SO400M-14-SigLIP \
+    --siglip_pretrained webli \
+    --siglip_epochs 5 \
+    --siglip_lr 1e-6 \
+    --siglip_batch_size 32
+```
+
 In order to run CLIP finetuned:
 
 ```

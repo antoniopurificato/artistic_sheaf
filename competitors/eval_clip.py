@@ -16,6 +16,7 @@ from src.utils import *
 from src.data import *
 from src.metrics import *
 from competitors.utils_competitors import *
+from competitors.data_competitors import load_json_data
 
 # =====================================================
 # ARGS

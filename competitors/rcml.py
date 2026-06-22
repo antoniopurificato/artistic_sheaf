@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 
-from src.data import load_json_data
+from competitors.data_competitors import load_json_data
 from src.metrics import compute_test_metrics
 from src.utils import seed_everything
 from competitors.utils_competitors import save_results

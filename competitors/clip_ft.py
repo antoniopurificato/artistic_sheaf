@@ -15,6 +15,7 @@ from torch_geometric.data import DataLoader
 from src.utils import *
 from src.data import *
 from src.metrics import *
+from competitors.data_competitors import load_json_data
 from competitors.utils_competitors import *
 
 
@@ -23,6 +24,7 @@ def parse_args():
 
     p.add_argument("--dataset", type=str, required=True)
     p.add_argument("--base_folder", type=str, default="data")
+    p.add_argument("--device_id", type=int, default=0)
     p.add_argument("--finetune_clip", action="store_true")
     p.add_argument("--clip_model", type=str, default="ViT-B-32")
     p.add_argument("--clip_pretrained", type=str, default="laion2b_s34b_b79k")
@@ -43,15 +45,15 @@ def parse_args():
                    help="Path to finetuned OpenCLIP checkpoint (.pt). "
                         "If omitted and --finetune_clip is set, script will try to auto-find latest checkpoint.")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--batch_divisor", type=int, default=8000, help="Controls number of eval batches")
+    p.add_argument("--batch_divisor", type=int, default=4000, help="Controls number of eval batches")
     p.add_argument("--save_embeds", action="store_true", help="Save embeddings to .npy")
 
     return p.parse_args()
 
 
-def get_device():
+def get_device(device_id):
     if torch.cuda.is_available():
-        return "cuda"
+        return f"cuda:{device_id}"
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return "mps"
     return "cpu"
@@ -195,7 +197,7 @@ def make_run_name(dataset, model, user_name=None):
 
 def main():
     args = parse_args()
-    device = get_device()
+    device = get_device(args.device_id)
     seed_everything(args.seed)
 
     dataset_name = args.dataset
@@ -299,7 +301,10 @@ def main():
             print(f"{key}: {value}")
             recalls[str(key)] = float(value)
     
-    save_results("clip_ft" if clip_ckpt else "clip", dataset_name, "retrieval", args.seed, recalls)
+    if "SigLIP" in args.clip_model:
+        save_results("siglip_ft" if clip_ckpt else "siglip", dataset_name, "retrieval", args.seed, recalls)
+    else:
+        save_results("clip_ft" if clip_ckpt else "clip", dataset_name, "retrieval", args.seed, recalls)
 
 
 if __name__ == "__main__":

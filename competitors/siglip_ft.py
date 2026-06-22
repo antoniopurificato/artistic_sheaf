@@ -10,6 +10,7 @@ def parse_args():
 
     p.add_argument("--dataset", type=str, required=True)
     p.add_argument("--base_folder", type=str, default="data")
+    p.add_argument("--device_id", type=int, default=0)
     p.add_argument("--siglip_model", type=str, default="ViT-SO400M-14-SigLIP")
     p.add_argument("--siglip_pretrained", type=str, default="webli")
 
@@ -34,13 +35,13 @@ def parse_args():
     )
 
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--batch_divisor", type=int, default=8000)
+    p.add_argument("--batch_divisor", type=int, default=4000)
     p.add_argument("--save_embeds", action="store_true")
 
     p.add_argument(
         "--clip_script",
         type=str,
-        default="competitors/clip_finetune.py",
+        default="competitors/clip_ft.py",
         help="Path to your existing CLIP finetune/eval script.",
     )
 
@@ -80,6 +81,7 @@ def main():
         "--base_folder", args.base_folder,
         "--clip_model", args.siglip_model,
         "--clip_pretrained", args.siglip_pretrained,
+        "--device_id", str(args.device_id),
         "--clip_epochs", str(args.siglip_epochs),
         "--clip_lr", str(args.siglip_lr),
         "--clip_wd", str(args.siglip_wd),

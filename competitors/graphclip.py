@@ -13,7 +13,7 @@ from torch_geometric.data import HeteroData
 from torch_geometric.nn import HeteroConv, SAGEConv
 from torch.nn.parameter import UninitializedParameter
 
-from src.data import load_json_data
+from competitors.data_competitors import load_json_data
 from src.utils import seed_everything
 from competitors.utils_competitors import save_results
 

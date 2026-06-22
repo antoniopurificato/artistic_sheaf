@@ -7,8 +7,7 @@ import torch.nn.functional as F
 from src.metrics import *
 from src.utils import *
 from src.data import *
-from competitors.utils_competitors import seed_everything, save_results
-
+from competitors.data_competitors import load_json_data
 from torch_geometric.data import DataLoader
 
 
