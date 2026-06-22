@@ -28,6 +28,8 @@ MAPPING_REDUCED = {
 MODEL_NAMES = {
     "sagenet": "ArtSAGENet",
     "clip": "CLIP",
+    "clipft" : "CLIP_ft",
+    "siglipft": "SigLIP_ft",
     "colpali": "ColPali",
     "colqwen2": "ColQwen",
     "msc": "MSC",
@@ -37,8 +39,8 @@ MODEL_NAMES = {
 
 DATASET_DISPLAY = {
     "SemArt": "SemArt",
-    "Hertziana": "HertzianaDP",
-    "Wikidataset": "WikiArt+",
+    "HertzianaDP": "HertzianaDP",
+    "WikiArtPlus": "WikiArt+",
 }
 
 COLOR_MAP = {
@@ -51,9 +53,9 @@ COLOR_MAP = {
     "CANVAS":  ("#e377c2", "x"),
 }
 
-ORDERED_MODELS = ["sagenet", "clip", "colpali", "colqwen2", "msc", "siglip", "sheafclip"]
+ORDERED_MODELS = ["sagenet", "clip", "colpali", "colqwen2", "msc", "siglip", "sheafclip", "clipft", "siglipft"]
 
-DATASET_ORDER = ["Hertziana", "SemArt", "Wikidataset"]
+DATASET_ORDER = ["HertzianaDP", "SemArt", "WikiArtPlus"]
 
 TASKS = {"retrieval"}
 
@@ -168,6 +170,7 @@ def generate_plot(summary: dict, metric: str, k: int) -> None:
                 summary[dataset][model].get(rel, {}).get("mean", 0)
                 for rel in relations
             ]
+
             color, hatch = COLOR_MAP[MODEL_NAMES[model]]
             ax.bar(x + i * width, means, width=width,
                    color=color, hatch=hatch, label=MODEL_NAMES[model])
@@ -220,11 +223,11 @@ def generate_table(metric: str, json_dir: str) -> None:
 
     # Classification metrics per dataset (metric@1)
     classification_metrics = {
-        "Hertziana": [
+        "HertzianaDP": [
             f"test_artist_i2t_{metric}@1",
             f"test_acquisition period_i2t_{metric}@1",
         ],
-        "Wikidataset": [
+        "WikiArtPlus": [
             f"test_artist_i2t_{metric}@1",
             f"test_date_i2t_{metric}@1",
             f"test_genre_i2t_{metric}@1",
