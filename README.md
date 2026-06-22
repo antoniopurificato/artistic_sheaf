@@ -43,3 +43,5 @@ python3 main.py --sweep True --params_sweep batch_size --dataset HertzianaDP
 Datasets could be `SemArtPlus`, `HertzianaDP` or `WikiArtPlus`.
 
 If you want to test the competitors, the `competitors` folder contains a README that allows to easily run the competitors.
+
+For the `HertzianaDP` dataset, we do not have the corresponding HuggingFace datasets due to permissions. If you want to download the data, refer to [this link](https://edmond.mpg.de/dataset.xhtml?persistentId=doi:10.17617/3.Z8W2JR) and [this link](https://edmond.mpg.de/dataset.xhtml?persistentId=doi:10.17617/3.1GN3OL). If you want to test CANVAS on HertzianaDP contact us and we will help you.
