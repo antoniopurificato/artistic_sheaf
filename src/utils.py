@@ -9,22 +9,57 @@ import numpy as np
 import argparse
 import os
 from fvcore.nn import FlopCountAnalysis
-import gdown
-import subprocess
 import json
+from datasets import load_dataset
 
-def data_download(base_folder="data"):
-    datasets = ['SemArt', 'HertzianaDP', 'WikiArtPlus']
-    os.makedirs(base_folder, exist_ok=True)
-    to_download = False
-    for dataset in datasets:
-        if not os.path.exists(os.path.join(base_folder, dataset)):
-            to_download = True
-    if to_download:
-        identifier = "1vMU8s8tajeBnajzKW74LPG47UBOmF0sh"
-        output = "data.zip"
-        gdown.download(id=identifier, output=output)
-        subprocess.run(["unzip", "data.zip"])        
+def data_download(base_folder="data", dataset_name="WikiArtPlus"):
+    import hashlib
+
+    split_name_map = {"train": "train", "validation": "val", "test": "test"}
+
+    dataset_dir = os.path.join(base_folder, dataset_name)
+    expected_jsons = [
+        os.path.join(dataset_dir, f"triplets_{dataset_name.lower()}_{v}.json")
+        for v in split_name_map.values()
+    ]
+    if all(os.path.exists(p) and os.path.getsize(p) > 2 for p in expected_jsons):
+        return
+
+    os.makedirs(dataset_dir, exist_ok=True)
+    img_dir = os.path.join(dataset_dir, "images")
+    os.makedirs(img_dir, exist_ok=True)
+
+    ds = load_dataset(f"antoniopuri/{dataset_name}")
+
+    img_hash_to_filename = {}
+
+    for hf_split, local_split in split_name_map.items():
+        if hf_split not in ds:
+            continue
+        split_data = ds[hf_split]
+        triplets = []
+        for idx, sample in enumerate(split_data):
+            img = sample["image"]
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            img_bytes = img.tobytes()
+            img_hash = hashlib.md5(img_bytes).hexdigest()
+
+            if img_hash not in img_hash_to_filename:
+                img_filename = f"{img_hash}.jpg"
+                img_path = os.path.join(img_dir, img_filename)
+                if not os.path.exists(img_path):
+                    img.save(img_path)
+                img_hash_to_filename[img_hash] = img_filename
+
+            triplets.append({
+                "image": os.path.join("images", img_hash_to_filename[img_hash]),
+                "text": sample["text"],
+                "link": sample["link"],
+            })
+        out_path = os.path.join(dataset_dir, f"triplets_{dataset_name.lower()}_{local_split}.json")
+        with open(out_path, "w") as f:
+            json.dump(triplets, f)        
         
         
 

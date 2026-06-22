@@ -14,7 +14,7 @@ DATASET_RELATIONS = {
         "style historical context",
         "style influences and precursors",
     ],
-    "SemArt": ["content", "context", "description", "form"],
+    "SemArtPlus": ["content", "context", "description", "form"],
 }
 
 # Shortened labels for Wikidataset x-axis
@@ -38,7 +38,7 @@ MODEL_NAMES = {
 }
 
 DATASET_DISPLAY = {
-    "SemArt": "SemArt",
+    "SemArtPlus": "SemArtPlus",
     "HertzianaDP": "HertzianaDP",
     "WikiArtPlus": "WikiArt+",
 }
@@ -55,7 +55,7 @@ COLOR_MAP = {
 
 ORDERED_MODELS = ["sagenet", "clip", "colpali", "colqwen2", "msc", "siglip", "sheafclip", "clipft", "siglipft"]
 
-DATASET_ORDER = ["HertzianaDP", "SemArt", "WikiArtPlus"]
+DATASET_ORDER = ["HertzianaDP", "SemArtPlus", "WikiArtPlus"]
 
 TASKS = {"retrieval"}
 
@@ -233,7 +233,7 @@ def generate_table(metric: str, json_dir: str) -> None:
             f"test_genre_i2t_{metric}@1",
             f"test_artwork_style_i2t_{metric}@1",
         ],
-        "SemArt": [
+        "SemArtPlus": [
             f"test_author_i2t_{metric}@1",
             f"test_genre_i2t_{metric}@1",
             f"test_school_i2t_{metric}@1",

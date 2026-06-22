@@ -9,23 +9,23 @@ def compute_test_metrics(img_emb, txt_emb, data_list, verbose=False, img_path=No
     results = {}
     
     adj_matrix, img_to_idx, txt_to_idx = make_adj_matrix(data_list) 
-    sim_matrix = get_sim_matrix([t["item1"] + t["link"] for t in data_list], 
-                                [t["item2"] + t["link"] for t in data_list], 
+    sim_matrix = get_sim_matrix([t["image"] + t["link"] for t in data_list],
+                                [t["text"] + t["link"] for t in data_list],
                                 img_emb, txt_emb,
                                 img_to_idx, txt_to_idx)
-    
+
     results.update(compute_bidirectional_metrics(torch.tensor(sim_matrix), torch.tensor(adj_matrix), k_values=[1, 5, 10], prefix="test_"))
-       
+
     if verbose:
         print('General metrics:')
         recalls = [k for k in results.keys() if 'recall' in k and 'mean' not in k]
         for rec in recalls:
-            print(rec, results[rec]) 
-        
+            print(rec, results[rec])
+
         recs = get_top_k_recommendations(torch.Tensor(sim_matrix), k=min(5, len(data_list)))
 
-        query_field = 'item1'  # image path
-        rec_field = 'item2'      # e.g., 'timeframe', 'author', etc.
+        query_field = 'image'
+        rec_field = 'text'
         idx_to_txt = {idx: txt for txt, idx in txt_to_idx.items()}
         idx_to_img = {idx: img for img, idx in img_to_idx.items()}
 
@@ -33,7 +33,7 @@ def compute_test_metrics(img_emb, txt_emb, data_list, verbose=False, img_path=No
             query = idx_to_img[i]
             recommendations = [idx_to_txt[j] for j in rec_indices]
             print(f"Query: {img_path + query}")
-            print(f"Ground Truth: {[loaded_it[rec_field] for loaded_it in data_list if loaded_it['item1'] + loaded_it['link'] == query]}")
+            print(f"Ground Truth: {[loaded_it[rec_field] for loaded_it in data_list if loaded_it['image'] + loaded_it['link'] == query]}")
             print("Recommendations:")
             for rec in recommendations:
                 print(f"  - {rec}")
@@ -48,22 +48,22 @@ def compute_test_metrics(img_emb, txt_emb, data_list, verbose=False, img_path=No
         clip_imgs_n = img_emb[indices_new]
         clip_txts_n = txt_emb[indices_new]
         
-        sim_matrix = get_sim_matrix([t["item1"] + t["link"] for t in loaded_data_new], 
-                                    [t["item2"] + t["link"] for t in loaded_data_new], 
+        sim_matrix = get_sim_matrix([t["image"] + t["link"] for t in loaded_data_new],
+                                    [t["text"] + t["link"] for t in loaded_data_new],
                                     clip_imgs_n, clip_txts_n,
                                     img_to_idx, txt_to_idx)
-        
+
         results.update(compute_bidirectional_metrics(torch.tensor(sim_matrix), torch.tensor(adj_matrix), k_values=[1, 5, 10], prefix=f"test_{typ}_"))
-        
+
         if verbose:
             print(f"Processing type: {typ}")
             recalls = [k for k in results.keys() if 'recall' in k and 'mean' not in k]
             for rec in recalls:
                 print(rec, results[rec])
-       
+
             recs = get_top_k_recommendations(torch.Tensor(sim_matrix), k=min(5, len(loaded_data_new)))
-            query_field = 'item1'  # image path
-            rec_field = 'item2'      # e.g., 'timeframe', 'author', etc.
+            query_field = 'image'
+            rec_field = 'text'
             idx_to_txt = {idx: txt for txt, idx in txt_to_idx.items()}
             idx_to_img = {idx: img for img, idx in img_to_idx.items()}
 
@@ -483,11 +483,10 @@ def compute_relation_aware_metrics(
 
 
 ## functions
-def make_adj_matrix(triplets, field='item2'):
+def make_adj_matrix(triplets, field='text'):
     """
     """
-    # Separate unique images (item1) and texts (item2)
-    images = sorted({t["item1"] + t["link"] for t in triplets})
+    images = sorted({t["image"] + t["link"] for t in triplets})
     texts = sorted({t[field] + t["link"] for t in triplets})
 
     # Create mapping
@@ -499,7 +498,7 @@ def make_adj_matrix(triplets, field='item2'):
 
     # Fill matrix
     for t in triplets:
-        i = img_to_idx[t["item1"] + t["link"]]
+        i = img_to_idx[t["image"] + t["link"]]
         j = txt_to_idx[t[field] + t["link"]]
         adj_matrix[i, j] = 1
 

@@ -18,10 +18,10 @@ from src.utils import *
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def get_clip_embedder(itm, preprocess, tokenizer, base_folder='../wikidata_arthist/',
-                      dataset_name:str="SemArt"):
+                      dataset_name:str="SemArtPlus"):
     
     with torch.no_grad():
-        if 'Images/' in itm or 'gemalde/' in itm or 'zeichnungen/' in itm or 'WIKIART_sample/' in itm:
+        if 'Images/' in itm or 'gemalde/' in itm or 'zeichnungen/' in itm or 'WIKIART_sample/' in itm or 'images/' in itm:
             try:
                 if len(itm.split('.')) == 1:
                     itm = itm + '.jpg'
@@ -46,9 +46,9 @@ def build_graph_from_json(
     preprocess,
     tokenizer,
     base_folder,
-    item2 = 'item2',
+    item2 = 'text',
     split = 'normal',
-    dataset_name:str="SemArt"
+    dataset_name:str="SemArtPlus"
 ) -> Tuple[Data, Dict[str, int], List[str], List[str]]:
     """
     Builds a PyTorch Geometric graph from the JSON input.
@@ -73,7 +73,7 @@ def build_graph_from_json(
 
     for item in tqdm(data_list):
         # Process nodes: 'sentence' and 'image_path'
-        for key in ['item1', item2]:
+        for key in ['image', item2]:
             val = str(item.get(key, ""))  # Convert non-string to string if needed
 
             if val not in node_to_id:
@@ -88,7 +88,7 @@ def build_graph_from_json(
                     print(f"[Warning] Failed to embed node '{val}': {e}")
 
         # Create edge
-        src = node_to_id[str(item.get('item1', ''))]
+        src = node_to_id[str(item.get('image', ''))]
         dst = node_to_id[str(item.get(item2, ''))]
         edge_index_list.append([src, dst])
         if split == 'cluster':  # add reverse edge only in training
@@ -189,11 +189,11 @@ def main(file_name:str, data_folder:str="data",
     
     data_list = load_json(json_path)[:2000] #make it batch loading
     graph_data, node_to_id, raw_edge_labels = build_graph_from_json(data_list, preprocess, tokenizer, base_folder,
-                                                                    dataset_name="SemArt")
+                                                                    dataset_name="SemArtPlus")
 
     if plot_subgr:
         plot_subgraph(graph_data, node_to_id, raw_edge_labels=raw_edge_labels, num_nodes=100)
 
 
 if __name__ == "__main__":
-    main(file_name="triplets_semart_test.json", base_folder="../SemArt/")
+    main(file_name="triplets_SemArtPlus_test.json", base_folder="../SemArtPlus/")
