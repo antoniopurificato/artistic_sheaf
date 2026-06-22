@@ -19,7 +19,7 @@ from src.metrics import *
 def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_size:int=1,
          base_folder: str = "data",
          checkpoint_name=None, sweep_config=None,
-         dataset_name:str="SemArt"):
+         dataset_name:str="SemArtPlus"):
     """
     Main function modified to use SheafMultimodalGNN with train/val/test splits.
     """
@@ -181,7 +181,6 @@ def main(data_folder: str = "data", plot_graph: bool = True, seed:int=42, batch_
 if __name__ == "__main__":
     
     # mp.set_start_method("spawn", force=True)
-    data_download()
 
     parser = argparse.ArgumentParser()
     
@@ -234,8 +233,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset",
         type=str,
-        default="SemArt",
-        choices=["SemArt", "HertzianaDP", "WikiArtPlus"],
+        default="SemArtPlus",
+        choices=["SemArtPlus", "HertzianaDP", "WikiArtPlus"],
         help="Name of the dataset.",
     )
     
@@ -261,7 +260,9 @@ if __name__ == "__main__":
     )
     
     args = parser.parse_args()
-     
+
+    data_download(dataset_name=args.dataset)
+
     if not args.sweep:
         main('data', plot_graph=False, batch_size=args.batch_size, seed=42,
              base_folder='data', sweep_config=args,

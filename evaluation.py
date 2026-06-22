@@ -18,7 +18,7 @@ from src.metrics import *
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, required=True, choices=["SemArt", "HertzianaDP", "WikiArtPlus"])
+    parser.add_argument("--dataset", type=str, required=True, choices=["SemArtPlus", "HertzianaDP", "WikiArtPlus"])
     parser.add_argument("--mode", type=str, required=True, default='graph', choices=["predict", "graph"])
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--batch_size", type=int, default=5000)
@@ -80,9 +80,9 @@ def build_model(args, device):
 def run_predict_mode(model, loaded_data, preprocess, tokenizer, args, device):
     images, texts, links = [], [], []
     for data_point in tqdm(loaded_data, desc="Preprocessing"):
-        image_path = os.path.join("data", args.dataset, data_point["item1"])
+        image_path = os.path.join("data", args.dataset, data_point["image"])
         image = preprocess(Image.open(image_path).convert("RGB")).unsqueeze(0).to(device)
-        text = tokenizer([data_point["item2"]]).to(device)
+        text = tokenizer([data_point["text"]]).to(device)
         link = tokenizer([data_point["link"]]).to(device)
         images.append(image)
         texts.append(text)

@@ -12,4 +12,5 @@ scikit-learn
 gdown
 calflops
 pandas
+datasets
 braceexpand
