@@ -1,6 +1,12 @@
 # Art Beyond Semantics: Sheaf-Informed Contrastive Learning for Multi-Relational Representations
 
-Download the repo, since we cannot clone it.
+Experiments tested on Python 3.10.
+
+Clone the repo:
+
+```
+https://github.com/antoniopurificato/artistic_sheaf.git
+```
 
 Jump into the repo:
 
