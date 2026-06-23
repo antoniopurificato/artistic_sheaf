@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, Dataset
 from competitors.data_competitors import load_json_data
 from src.metrics import compute_test_metrics
 from src.utils import seed_everything
-from competitors.utils_competitors import save_results
+from src.utils import save_results
 
 
 @dataclass
@@ -298,7 +298,7 @@ def run_rcml(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, default="SemArtPlus", choices=["SemArtPlus", "Hertziana", "Wikidataset"])
+    parser.add_argument("--dataset", type=str, default="SemArtPlus", choices=["SemArtPlus", "HertzianaDP", "WikiArtPlus"])
     parser.add_argument("--data_folder", type=str, default="data")
     parser.add_argument("--base_folder", type=str, default="data")
     parser.add_argument("--batch_size", type=int, default=128)
